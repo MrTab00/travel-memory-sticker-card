@@ -8,16 +8,38 @@ Excel の集計表として出力します。手書きの自由記述と選択�
 
 ---
 
+> **入力 PDF は手元の PC から Anthropic API に直接送られます。**
+> 顧客の記入済みアンケートを外部 API に送ることになるため、社内規程上の可否を先にご確認ください。
+
+---
+
 ## 1. セットアップ
 
-```bash
-cd survey-pdf-extractor
+**Windows（PowerShell）**
 
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+```powershell
+git clone -b claude/survey-pdf-extraction-tool-vqb9pz https://github.com/MrTab00/travel-memory-sticker-card.git
+cd travel-memory-sticker-card\survey-pdf-extractor
+
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-export ANTHROPIC_API_KEY='sk-ant-...'   # Windows: set ANTHROPIC_API_KEY=sk-ant-...
+$env:ANTHROPIC_API_KEY = "sk-ant-..."     # このウィンドウだけ有効
+# 恒久的に設定する場合: setx ANTHROPIC_API_KEY "sk-ant-..." （設定後は新しいウィンドウで実行）
+```
+
+**macOS / Linux**
+
+```bash
+git clone -b claude/survey-pdf-extraction-tool-vqb9pz https://github.com/MrTab00/travel-memory-sticker-card.git
+cd travel-memory-sticker-card/survey-pdf-extractor
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+export ANTHROPIC_API_KEY='sk-ant-...'
 ```
 
 API キーはコードに書かず、必ず環境変数 `ANTHROPIC_API_KEY` から読みます。
@@ -29,6 +51,17 @@ python main.py --self-test
 ```
 
 `output/selftest/` にダミーデータの Excel が生成されれば、Python 側の環境は正常です。
+
+### 実行の全体像（この順に進めれば終わります）
+
+```powershell
+mkdir input                       # ここにスキャンPDFを置く
+python main.py --self-test        # 課金なし。環境の確認
+python main.py --show-groups      # 右上の番号での回答者の分かれ方を確認
+python main.py --dry-run          # 概算コストを確認
+python main.py --only No01        # まず1名だけ。原本と突き合わせる
+python main.py                    # 全員分 → output\aggregate_YYYYMMDD.xlsx
+```
 
 ---
 
