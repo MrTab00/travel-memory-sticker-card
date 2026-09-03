@@ -1,0 +1,263 @@
+"""コマンドラインエントリポイント。"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from . import pricing
+from .aggregate import write_excel
+from .config import Config, ConfigError, load_config
+from .extractor import ExtractionError, Extractor, load_records, save_record
+from .pdf_utils import PdfError, Respondent, discover_respondents
+from .schema import build_tool
+from .selftest import build_dummy_records
+
+DEFAULT_QUESTIONS = "questions.yaml"
+DEFAULT_INPUT = "input"
+DEFAULT_OUTPUT = "output"
+
+
+def _log(message: str = "") -> None:
+    print(message, flush=True)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="survey-pdf-extractor",
+        description="スキャンしたアンケートPDFから回答を抽出し、Excel に集計する。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+例:
+  python main.py                          # input/ を処理して output/ に Excel を出力
+  python main.py --dry-run                # API を呼ばずに概算コストだけ確認
+  python main.py --only 回答者A           # 1名だけ処理（サンプル確認用）
+  python main.py --aggregate-only         # 既存の output/raw/*.json だけで集計し直す
+  python main.py --self-test              # ダミーデータで Excel 生成を確認（API 不要）
+""",
+    )
+    parser.add_argument("--questions", default=DEFAULT_QUESTIONS, help="設問定義ファイル (既定: questions.yaml)")
+    parser.add_argument("--input", default=DEFAULT_INPUT, help="入力 PDF のディレクトリ (既定: input)")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT, help="出力ディレクトリ (既定: output)")
+    parser.add_argument("--layout", choices=["auto", "per_respondent", "single_file"], help="入力 PDF の構成（questions.yaml を上書き）")
+    parser.add_argument("--pages", type=int, help="1名あたりのページ数（questions.yaml を上書き）")
+    parser.add_argument("--model", help="使用するモデル（questions.yaml を上書き）")
+    parser.add_argument("--only", nargs="+", metavar="ID", help="指定した回答者IDだけ処理する")
+    parser.add_argument("--force", action="store_true", help="raw/ に JSON があっても再抽出する")
+    parser.add_argument("--images", action="store_true", help="PDF 直送をやめ、最初から画像として送る")
+    parser.add_argument("--aggregate-only", action="store_true", help="API を呼ばず、既存の raw/*.json から集計だけ行う")
+    parser.add_argument("--dry-run", action="store_true", help="トークン数を数えて概算コストを表示し、抽出はしない")
+    parser.add_argument("--self-test", action="store_true", help="ダミーデータでパイプラインを検証する（API 不要）")
+    return parser
+
+
+def _apply_overrides(config: Config, args: argparse.Namespace) -> Config:
+    meta = config.meta
+    model = config.model
+    if args.layout:
+        meta = dataclasses.replace(meta, layout=args.layout)
+    if args.pages:
+        meta = dataclasses.replace(meta, pages_per_respondent=args.pages)
+    if args.model:
+        model = dataclasses.replace(model, name=args.model)
+    return dataclasses.replace(config, meta=meta, model=model)
+
+
+def _output_path(output_dir: Path, suffix: str = "") -> Path:
+    stamp = datetime.now().strftime("%Y%m%d")
+    return output_dir / f"aggregate_{stamp}{suffix}.xlsx"
+
+
+def _report_excel(config: Config, records: list[dict[str, Any]], path: Path) -> None:
+    if not records:
+        _log("集計対象の抽出結果がありません。Excel は生成しませんでした。")
+        return
+    if path.exists():
+        _log(f"※ 既存の {path.name} を上書きします。")
+    path, counts = write_excel(config, records, path)
+    _log("")
+    _log(f"Excel を生成しました: {path}")
+    _log(f"  生データ : {counts['respondents']} 名")
+    _log(f"  集計     : {counts['summary_rows']} 行")
+    _log(f"  要確認   : {counts['review_rows']} セル（confidence が low / medium のもの）")
+    if counts["review_rows"]:
+        _log("  → 手書きの誤読は統計に紛れると発見できません。必ず「要確認」シートを原本と突き合わせてください。")
+
+
+def _check_api_key() -> None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        _log("環境変数 ANTHROPIC_API_KEY が設定されていません。")
+        _log("  export ANTHROPIC_API_KEY='sk-ant-...' を実行してから再度お試しください。")
+        raise SystemExit(2)
+
+
+def _select(respondents: list[Respondent], only: list[str] | None) -> list[Respondent]:
+    if not only:
+        return respondents
+    wanted = set(only)
+    selected = [r for r in respondents if r.id in wanted]
+    missing = wanted - {r.id for r in selected}
+    if missing:
+        _log(f"※ 指定された回答者IDが見つかりません: {', '.join(sorted(missing))}")
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# 各モード
+# ---------------------------------------------------------------------------
+def _run_self_test(config: Config, output_dir: Path) -> int:
+    _log("=== セルフテスト（API は呼び出しません）===")
+    tool = build_tool(config, strict=config.model.strict_tools)
+    fields = len(tool["input_schema"]["properties"])
+    _log(f"ツールスキーマを生成: {tool['name']} / フィールド {fields} 件")
+
+    records = build_dummy_records(config)
+    raw_dir = output_dir / "selftest" / "raw"
+    for record in records:
+        save_record(record, raw_dir)
+    _log(f"ダミーの抽出結果 {len(records)} 件を {raw_dir} に保存しました。")
+
+    _report_excel(config, records, _output_path(output_dir / "selftest", "_selftest"))
+    _log("")
+    _log("セルフテスト完了。実データを input/ に置いて `python main.py` を実行してください。")
+    return 0
+
+
+def _run_dry_run(config: Config, respondents: list[Respondent]) -> int:
+    _check_api_key()
+    extractor = Extractor(config, force_images=False, log=_log)
+    sample = respondents[0]
+    _log(f"サンプル: {sample.id}（{sample.page_count}ページ）のトークン数を数えます…")
+    try:
+        input_tokens = extractor.count_tokens(sample)
+    except Exception as exc:  # noqa: BLE001 - 見積りは失敗しても致命的でない
+        _log(f"トークン数の取得に失敗しました: {exc}")
+        return 1
+
+    estimated_output = 250 * len(config.questions) + 500  # 1設問あたりの目安
+    per_person = pricing.estimate_usd(config.model.name, input_tokens, estimated_output)
+    _log("")
+    _log(f"1名あたり: 入力 {input_tokens:,} tok / 出力(推定) {estimated_output:,} tok")
+    if per_person is not None:
+        total = per_person * len(respondents)
+        _log(f"1名あたり概算: ${per_person:.3f}（約 {per_person * pricing.DEFAULT_USD_JPY:,.0f} 円）")
+        _log(
+            f"全{len(respondents)}名の概算: ${total:.2f}"
+            f"（約 {total * pricing.DEFAULT_USD_JPY:,.0f} 円 / 1USD={pricing.DEFAULT_USD_JPY:.0f}円換算）"
+        )
+    _log("※ 出力トークン数は設問数からの推定値です。実際の請求額は公式の料金表と使用実績を確認してください。")
+    return 0
+
+
+def _run_extraction(
+    config: Config, respondents: list[Respondent], output_dir: Path, args: argparse.Namespace
+) -> int:
+    _check_api_key()
+    raw_dir = output_dir / "raw"
+    extractor = Extractor(config, force_images=args.images, log=_log)
+
+    succeeded: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    failures: list[tuple[str, str]] = []
+    totals = {"input": 0, "output": 0}
+
+    total = len(respondents)
+    for index, respondent in enumerate(respondents, start=1):
+        existing = raw_dir / f"{respondent.id}.json"
+        if existing.exists() and not args.force:
+            _log(f"[{index}/{total}] スキップ（抽出済み）: {respondent.id}")
+            skipped.append(respondent.id)
+            continue
+
+        _log(f"[{index}/{total}] 処理中: {respondent.id} ...")
+        try:
+            record = extractor.extract(respondent)
+        except ExtractionError as exc:
+            _log(f"    失敗: {exc}")
+            failures.append((respondent.id, str(exc)))
+            continue
+        except Exception as exc:  # noqa: BLE001 - 1名の失敗で全体を止めない
+            _log(f"    想定外のエラー: {type(exc).__name__}: {exc}")
+            failures.append((respondent.id, f"{type(exc).__name__}: {exc}"))
+            continue
+
+        save_record(record, raw_dir)
+        succeeded.append(record)
+        totals["input"] += record["usage"].get("input_tokens", 0)
+        totals["output"] += record["usage"].get("output_tokens", 0)
+
+        review = sum(1 for a in record["answers"].values() if a["confidence"] in ("low", "medium"))
+        _log(f"    完了（要確認 {review} 件 / 全 {len(record['answers'])} 設問）")
+
+    _log("")
+    _log(f"抽出: 成功 {len(succeeded)} 名 / スキップ {len(skipped)} 名 / 失敗 {len(failures)} 名")
+    if succeeded:
+        _log("今回の API 使用量: " + pricing.format_cost(config.model.name, totals["input"], totals["output"]))
+
+    if failures:
+        _log("")
+        _log("--- 失敗した回答者 ---")
+        for rid, reason in failures:
+            _log(f"  {rid}: {reason}")
+        _log("（失敗分は raw/ に JSON が無いので、原因を直して再実行すれば続きから処理されます）")
+
+    records = load_records(raw_dir)
+    _report_excel(config, records, _output_path(output_dir))
+    return 1 if failures else 0
+
+
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    try:
+        config = _apply_overrides(load_config(args.questions), args)
+    except ConfigError as exc:
+        _log(f"設定エラー: {exc}")
+        return 2
+
+    output_dir = Path(args.output)
+    _log(f"アンケート : {config.meta.survey_name}")
+    _log(f"設問数     : {len(config.questions)}")
+    _log(f"モデル     : {config.model.name}")
+    _log("")
+
+    if args.self_test:
+        return _run_self_test(config, output_dir)
+
+    if args.aggregate_only:
+        records = load_records(output_dir / "raw")
+        _log(f"{output_dir / 'raw'} から {len(records)} 件の抽出結果を読み込みました。")
+        _report_excel(config, records, _output_path(output_dir))
+        return 0
+
+    try:
+        respondents, warnings = discover_respondents(
+            Path(args.input), config.meta.layout, config.meta.pages_per_respondent
+        )
+    except PdfError as exc:
+        _log(f"入力エラー: {exc}")
+        return 2
+
+    for warning in warnings:
+        _log(f"※ {warning}")
+    respondents = _select(respondents, args.only)
+    if not respondents:
+        _log("処理対象の回答者がいません。")
+        return 2
+    _log(f"回答者 {len(respondents)} 名分を検出しました。")
+    _log("")
+
+    if args.dry_run:
+        return _run_dry_run(config, respondents)
+
+    return _run_extraction(config, respondents, output_dir, args)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

@@ -1,0 +1,264 @@
+# アンケートPDF 自動抽出・集計ツール
+
+紙のアンケート（顧客記入済み）をスキャンした PDF から、Claude の Vision で回答を読み取り、
+Excel の集計表として出力します。手書きの自由記述と選択式が混在した用紙を想定しています。
+
+**テキストレイヤーのないスキャン PDF が前提**です。pdfplumber / PyPDF2 によるテキスト抽出は
+一切行わず、PDF を document ブロックとして Claude に直接渡して画像として読ませます。
+
+---
+
+## 1. セットアップ
+
+```bash
+cd survey-pdf-extractor
+
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+export ANTHROPIC_API_KEY='sk-ant-...'   # Windows: set ANTHROPIC_API_KEY=sk-ant-...
+```
+
+API キーはコードに書かず、必ず環境変数 `ANTHROPIC_API_KEY` から読みます。
+
+動作確認（API を呼ばず、課金も発生しません）:
+
+```bash
+python main.py --self-test
+```
+
+`output/selftest/` にダミーデータの Excel が生成されれば、Python 側の環境は正常です。
+
+---
+
+## 2. 設問を定義する（最初に必ず行う作業）
+
+`questions.yaml` を実際のアンケートに合わせて書き換えてください。
+**このファイルが抽出スキーマ・Excel の列・集計方法のすべての元になります。**
+Python コードを編集する必要はありません。
+
+```yaml
+questions:
+  - id: Q1
+    type: single_choice          # 選択式（1つ選ぶ）
+    text: 貴社の業種は？
+    choices: [製造業, 商社, その他]
+
+  - id: Q3
+    type: multi_choice           # 複数選択
+    text: 関心のある規制
+    choices: [CRA, NIS2, JC-STAR, EU Data Act]
+
+  - id: Q4
+    type: free_text              # 自由記述（手書き）
+    text: 現在の課題
+    note: 要約せず原文のまま         # 任意。読み取り時の注意をモデルに伝える
+
+  - id: Q5
+    type: number                 # 数値
+    text: 対象製品数
+    unit: 製品                    # 任意
+```
+
+| type | 意味 | Excel の値 | 集計 |
+|---|---|---|---|
+| `single_choice` | 選択式（1つ） | 選択肢の文字列 | 選択肢別の件数・構成比 |
+| `multi_choice` | 複数選択 | `A / B` のように連結 | 選択肢ごとに独立カウント |
+| `free_text` | 自由記述 | 原文のまま | 記入件数のみ |
+| `number` | 数値 | 数値（Excel でも数値型） | 件数・平均・中央値・最小・最大 |
+
+`meta:` と `model:` セクションでページ数・レイアウト・モデル・解像度なども変更できます
+（詳細は `questions.yaml` 内のコメント参照）。
+
+---
+
+## 3. 入力 PDF を置く
+
+`input/` ディレクトリを作り、スキャン PDF を置きます。構成は 2 パターンに対応しています。
+
+**(a) 1名 = 1ファイル** — ファイル名（拡張子を除く）がそのまま回答者IDになります。
+
+```
+input/
+  回答者A.pdf     ← 6ページ
+  回答者B.pdf
+```
+
+**(b) 全員が1ファイル** — `meta.pages_per_respondent`（既定 6）ごとに自動で分割します。
+回答者IDは `ファイル名_01`, `ファイル名_02` … になります。
+
+```
+input/
+  アンケート全員分.pdf   ← 120ページ = 20名 × 6ページ
+```
+
+どちらかは `meta.layout: auto` が自動判定します（判定結果は実行時に表示されます）。
+明示したい場合は `--layout per_respondent` / `--layout single_file` を付けてください。
+
+---
+
+## 4. 実行
+
+```bash
+# 概算コストだけ先に確認する（実際のトークン数を数えるだけで、抽出はしない）
+python main.py --dry-run
+
+# まず1名だけ試して、原本と突き合わせる（受け入れ確認の第一歩）
+python main.py --only 回答者A
+
+# 全員分を処理して Excel を生成
+python main.py
+```
+
+進捗はコンソールに `[3/20] 処理中: 回答者C ...` の形式で表示されます。
+1名分が失敗しても処理は止まらず、最後に失敗リストがまとめて表示されます。
+
+### よく使うオプション
+
+| オプション | 説明 |
+|---|---|
+| `--only ID [ID...]` | 指定した回答者だけ処理する |
+| `--force` | 抽出済み（`output/raw/*.json` がある）でも再抽出する |
+| `--aggregate-only` | API を呼ばず、既存の `output/raw/*.json` だけで Excel を作り直す |
+| `--dry-run` | トークン数を数えて概算コストを表示。抽出はしない |
+| `--images` | PDF 直送をやめ、最初から 300dpi の画像として送る |
+| `--model MODEL` | モデルを一時的に変更する |
+| `--layout` / `--pages` | 入力構成・1名あたりページ数を上書きする |
+| `--self-test` | API を使わずダミーデータでパイプラインを検証する |
+
+**再実行は安全です。** `output/raw/{回答者ID}.json` が既にある回答者は自動でスキップされるため、
+途中で失敗しても続きから再開でき、API を無駄に再実行しません。
+
+---
+
+## 5. 出力
+
+```
+output/
+  aggregate_YYYYMMDD.xlsx      ← 集計結果
+  raw/
+    回答者A.json               ← 抽出結果の生データ（再集計用）
+    回答者B.json
+```
+
+### `aggregate_YYYYMMDD.xlsx`
+
+| シート | 内容 |
+|---|---|
+| **生データ** | 1行 = 1回答者、1列 = 1設問。A列に回答者ID。自由記述は原文のまま（要約しません）。信頼度が低いセルには色が付きます（橙 = low、黄 = medium） |
+| **集計** | 選択式は選択肢別の件数と構成比、複数選択は選択肢ごとの独立カウント、数値は件数・平均・中央値・最小・最大。各設問の未記入／判読不能の件数も出ます |
+| **要確認** | confidence が `low` / `medium` のセルだけを抽出。回答者ID / 設問ID / 設問文 / 抽出値 / 読み取り原文 / 状態 / confidence / 該当ページ / 備考 |
+
+**「要確認」シートは必ず原本と突き合わせてください。**
+手書きの誤読は、いったん統計に紛れ込むと後から発見するのが困難です。
+
+### `raw/{回答者ID}.json`
+
+各設問について以下を保存します。集計をやり直すときに API を再実行しなくて済みます。
+
+```json
+"Q2": {
+  "value": "着手済",              // 正規化後の値（選択式は選択肢と完全一致）
+  "raw_text": "検討中を二重線で消し、着手済に丸",  // 実際に読み取った文字列（原文ママ）
+  "status": "answered",           // answered / blank（未記入） / unreadable（判読不能）
+  "confidence": "medium",         // high / medium / low
+  "page": 2,                      // 該当ページ番号
+  "flags": []                     // ツール側の検算で付いた警告
+}
+```
+
+判読不能な場合は空文字ではなく `null` + `confidence: low` が入り、
+**未記入（`blank`）と判読不能（`unreadable`）は明確に区別されます。**
+
+---
+
+## 6. 精度のための仕組み
+
+- **構造化出力は tool use（function calling）で強制**しています。
+  「JSON だけ返して」というプロンプト指示は前置きが混入するため使っていません。
+  `tool_choice` でツール呼び出しを強制し、`input_schema`（`strict` モード）で構造を縛ります。
+- プロンプトで以下を明示しています。
+  - レ点・丸囲み・塗りつぶし・下線など、チェックの表現の多様さを見落とさない
+  - 修正跡（二重線で消して書き直し）がある場合は最終的な回答を採用する
+  - 推測で埋めない。読めないものは読めないと返す。未記入と判読不能を区別する
+- モデルの出力をそのまま信じず、`normalize.py` で検算します。
+  選択肢との突き合わせ（表記ゆれ補正）、全角・単位付き数値のパース、
+  `status` と `value` の整合性チェックを行い、**怪しい値は自動で confidence を下げて
+  「要確認」シートに必ず出します**（例: `choice_mismatch`, `number_from_raw_text`）。
+
+---
+
+## 7. 概算コスト・所要時間
+
+既定モデルは **`claude-sonnet-5`**（$2.00 / 1M 入力トークン、$10.00 / 1M 出力トークン）です。
+
+スキャン A4 1ページはおおむね 1,500〜3,000 入力トークンになります。
+
+| 単位 | 入力 | 出力 | 概算 |
+|---|---|---|---|
+| 1名（6ページ） | 約 10,000〜18,000 tok | 約 800〜3,000 tok | **$0.03〜0.10（約 5〜15 円）** |
+| 20名（120ページ） | 約 20 倍 | 約 20 倍 | **$0.7〜2.0（約 100〜300 円）** |
+
+設問数が多いほど出力トークンが増えます。**実行前に `python main.py --dry-run` を実行すると、
+実際の PDF でトークン数を数えた見積りが出ます**（この確認自体に課金は発生しません）。
+
+所要時間は 1名あたり 30〜60 秒程度、20名で 10〜20 分が目安です。
+総ページ数 120 程度なので並列化はしていません（逐次処理）。
+
+> 料金は変わりえます。正確な単価は公式の料金ページで確認してください。
+> 為替は 1USD = 155円 で換算しています（`survey_extractor/pricing.py` で変更可）。
+
+---
+
+## 8. 受け入れ確認の手順
+
+1. `python main.py --self-test` … API なしで Excel 生成まで通ることを確認
+2. `python main.py --dry-run` … 概算コストを確認
+3. `python main.py --only <サンプル1名のID>` … **生成された Excel と原本を目視で突き合わせる**
+   （特に選択式のチェック位置、修正跡のある設問、数値の桁）
+4. 問題なければ `python main.py` で全員分を実行
+5. 「要確認」シートに並んだセルを原本と突き合わせ、必要なら「生データ」シートを手で修正
+
+---
+
+## 9. トラブルシューティング
+
+| 症状 | 対応 |
+|---|---|
+| `環境変数 ANTHROPIC_API_KEY が設定されていません` | `export ANTHROPIC_API_KEY='sk-ant-...'` を実行 |
+| `モデルまたはエンドポイントが見つかりません` | `questions.yaml` の `model.name` を確認。モデル文字列は公式ドキュメントで最新を確認してください |
+| `temperature` で 400 エラー | Claude Sonnet 5 / Opus 5 など最新世代では `temperature` は廃止されており、送ると 400 になります。既定では送信しません。どうしても `temperature: 0` を使いたい場合は旧世代モデル（例: `claude-sonnet-4-5`）を指定してください。なお本ツールは 400 の内容を見て `temperature` / `thinking` / `strict` などを自動で外して再試行します |
+| PDF が大きすぎる / ページが多すぎる | 自動で 300dpi の PNG に変換して送り直します（`--images` で最初から画像にすることも可能） |
+| 手書きの誤読が多い | `questions.yaml` の `model.thinking: adaptive` + `model.effort: high` を試す。それでも改善しない場合は `model.name: claude-opus-5` に変更（コストは上がります） |
+| `max_tokens に達して出力が途中で切れました` | 設問数が多い場合。`model.max_tokens` を増やす |
+| 429 / 5xx エラー | 指数バックオフで最大3回自動リトライします。それでも失敗した回答者は最後にリストされるので、再実行すれば続きから処理されます |
+
+---
+
+## 10. 顧客情報の取り扱い
+
+`input/`（顧客記入済み PDF）、`output/`（中間 JSON・Excel）は
+リポジトリルートの `.gitignore` で除外済みです。**絶対にコミットしないでください。**
+
+---
+
+## 11. ファイル構成
+
+```
+survey-pdf-extractor/
+├── main.py                     エントリポイント
+├── questions.yaml              設問定義（★ここを書き換える）
+├── requirements.txt
+└── survey_extractor/
+    ├── config.py               questions.yaml の読み込み・検証
+    ├── schema.py               設問定義 → tool use の input_schema
+    ├── prompts.py              システムプロンプト・指示文
+    ├── pdf_utils.py            PDF の列挙・分割・画像フォールバック
+    ├── extractor.py            API 呼び出し・リトライ・結果の組み立て
+    ├── normalize.py            出力の正規化と検算（confidence の引き下げ）
+    ├── aggregate.py            pandas 結合・集計・Excel 出力
+    ├── pricing.py              概算コスト計算
+    ├── selftest.py             ダミーデータ生成（API 不要の動作確認用）
+    └── cli.py                  コマンドライン処理
+```

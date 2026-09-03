@@ -1,0 +1,7 @@
+# Python 3.11+
+anthropic>=1.3.0      # Claude API SDK
+pypdf>=5.0.0          # PDF のページ数取得・回答者単位への分割
+pandas>=2.0.0         # 抽出結果の結合・集計
+openpyxl>=3.1.0       # Excel 出力
+PyYAML>=6.0           # questions.yaml の読み込み
+pymupdf>=1.24.0       # 画像フォールバック（PDF を PNG 化）

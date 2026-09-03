@@ -1,0 +1,10 @@
+# 顧客情報を含むため、入力 PDF・中間 JSON・出力 Excel は絶対にコミットしない
+input/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
