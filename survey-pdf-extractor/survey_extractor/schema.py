@@ -36,6 +36,17 @@ def _value_schema(q: Question) -> dict[str, Any]:
                 "1つも選択されていなければ空配列、判読不能なら null。"
             ),
         }
+    if q.type == "rating":
+        labels = "、".join(q.scale_label(v) for v in q.scale_values)
+        return {
+            "type": ["integer", "null"],
+            "enum": [*q.scale_values, None],
+            "description": (
+                f"丸（○）が付けられている数字（{q.scale_min}〜{q.scale_max}）。{labels}。"
+                "丸の位置を数字そのもので判断し、選択肢の文言から推測しないこと。"
+                "未記入・判読不能・どれに丸が付いているか特定できない場合は null。"
+            ),
+        }
     if q.type == "number":
         unit = f"（単位: {q.unit}）" if q.unit else ""
         return {
@@ -56,7 +67,10 @@ def _value_schema(q: Question) -> dict[str, Any]:
 
 
 def _answer_schema(q: Question) -> dict[str, Any]:
-    choices = f" / 選択肢: {' | '.join(q.choices)}" if q.choices else ""
+    if q.is_rating:
+        choices = f" / 尺度: {' | '.join(q.scale_label(v) for v in q.scale_values)}"
+    else:
+        choices = f" / 選択肢: {' | '.join(q.choices)}" if q.choices else ""
     note = f" / 注意: {q.note}" if q.note else ""
     return {
         "type": "object",

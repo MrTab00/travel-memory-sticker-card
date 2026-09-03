@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import Config
-from .normalize import normalize_answer
+from .normalize import normalize_answer, postprocess_record
 
 
 def _fake_raw_answer(q, rng: random.Random, page: int) -> dict[str, Any]:
@@ -53,6 +53,16 @@ def _fake_raw_answer(q, rng: random.Random, page: int) -> dict[str, Any]:
             "page": page,
         }
 
+    if q.type == "rating":
+        score = rng.choice([3, 4, 4, 5, 5, 2])
+        return {
+            "value": score,
+            "raw_text": f"{score} に丸",
+            "status": "answered",
+            "confidence": confidence,
+            "page": page,
+        }
+
     if q.type == "number":
         n = rng.randint(1, 200)
         if roll > 0.9:  # 全角・単位付きの手書き（正規化の確認）
@@ -84,6 +94,7 @@ def build_dummy_records(config: Config, count: int = 5, seed: int = 42) -> list[
         for index, q in enumerate(config.questions):
             page = min(index // 2 + 1, config.meta.pages_per_respondent)
             answers[q.id] = normalize_answer(q, _fake_raw_answer(q, rng, page))
+        postprocess_record(config.questions, answers, config.meta.flag_uniform_min_ratings)
         records.append(
             {
                 "schema_version": 1,

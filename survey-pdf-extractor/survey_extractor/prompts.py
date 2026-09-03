@@ -31,7 +31,12 @@ SYSTEM_PROMPT = """\
    （例: "約５０台" → value=50, raw_text="約５０台", confidence="medium"）。
 7. confidence は自分の読みへの自信であり、回答者の書きぶりの丁寧さではない。
    少しでも迷ったら medium、推測が入るなら low。high は「明確に読める」場合のみ。
-8. page には、その設問が印刷されていたページ番号（この回答者の PDF 内で1始まり）を入れる。
+8. 5段階評価（rating）は、**丸（○）で囲まれている数字そのもの**を返す。
+   選択肢の文言や、他の設問・自由記述の内容から「この人はきっと満足しているはず」と
+   推測して数字を変えてはならない。丸が2つの数字にまたがっている、または
+   どこに付いているか特定できない場合は null + confidence="low" とし、
+   raw_text にその状況を書く（例: "1と2の間に丸"）。
+9. page には、その設問が印刷されていたページ番号（この回答者の PDF 内で1始まり）を入れる。
 
 【出力方法】
 必ず {tool_name} ツールを1回だけ呼び出して結果を返すこと。
@@ -43,6 +48,8 @@ def _question_line(q: Question) -> str:
     parts = [f"- {q.id} [{q.type}] {q.text}"]
     if q.choices:
         parts.append(f"    選択肢: {' / '.join(q.choices)}")
+    if q.is_rating:
+        parts.append(f"    尺度（丸が付いた数字を返す）: {' / '.join(q.scale_label(v) for v in q.scale_values)}")
     if q.unit:
         parts.append(f"    単位: {q.unit}")
     if q.note:

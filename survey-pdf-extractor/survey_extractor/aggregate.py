@@ -120,6 +120,32 @@ def build_summary_sheet(config: Config, records: list[dict[str, Any]]) -> pd.Dat
             add(q, "未記入", blank, blank / total if total else None)
             add(q, "判読不能", unreadable, unreadable / total if total else None)
 
+        elif q.is_rating:
+            scores: list[int] = []
+            blank = unreadable = 0
+            counts = {v: 0 for v in q.scale_values}
+            for record in records:
+                a = _answer(record, q.id)
+                v = a.get("value")
+                if isinstance(v, int) and not isinstance(v, bool) and v in counts:
+                    scores.append(v)
+                    counts[v] += 1
+                elif a.get("status") == "blank":
+                    blank += 1
+                else:
+                    unreadable += 1
+            denominator = len(scores) or 1
+            add(q, "有効回答数", len(scores), len(scores) / total if total else None)
+            if scores:
+                add(q, "平均", round(statistics.mean(scores), 2))
+                add(q, "中央値", round(statistics.median(scores), 2))
+                add(q, "最小", min(scores))
+                add(q, "最大", max(scores))
+            for v in q.scale_values:
+                add(q, q.scale_label(v), counts[v], counts[v] / denominator)
+            add(q, "未記入", blank, blank / total if total else None)
+            add(q, "判読不能", unreadable, unreadable / total if total else None)
+
         elif q.type == "number":
             values: list[float] = []
             blank = unreadable = 0

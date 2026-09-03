@@ -1,85 +1,181 @@
 # =============================================================================
-# アンケート設問定義ファイル
+# CRA 自己宣言ワークショップ アンケート 設問定義
 # =============================================================================
+# 2026-08-26 実施「CRA 自己宣言ワークショップ」アンケート用紙（全6ページ、
+# 1ページ目は表紙のご挨拶）に合わせて定義。
 # ここを書き換えるだけで、抽出スキーマ・Excel の列・集計方法がすべて変わります。
-# Python コードを触る必要はありません。
-#
-# ★★★ 下の questions: は「サンプル（要件定義書 §3 の例）」です。
-#     実際の設問に必ず差し替えてください。 ★★★
 # =============================================================================
 
 meta:
-  survey_name: "CRA/EU規制 対応状況アンケート"
+  survey_name: "CRA 自己宣言ワークショップ アンケート"
 
-  # 1名あたりのページ数。全員分が1つの PDF になっている場合の分割単位に使う。
+  # 1名あたりのページ数（表紙1ページ＋設問5ページ = 6）
   pages_per_respondent: 6
 
-  # 入力 PDF の構成
-  #   auto          : 自動判定（ファイルが1つでページ数が pages_per_respondent より
-  #                   十分多ければ「全員1ファイル」とみなして分割する）
-  #   per_respondent: 1ファイル = 1名（ファイル名が回答者IDになる）
-  #   single_file   : 全員が1ファイル（pages_per_respondent ごとに分割する）
+  # auto | per_respondent | single_file
   layout: auto
 
+  # 5段階評価がすべて最低値（1）で、かつ自由記述が書かれている回答者を
+  # 「尺度の向きを取り違えた可能性あり」として要確認シートに出す
+  flag_uniform_min_ratings: true
+
 model:
-  # モデル文字列（2026-09 時点の最新 Sonnet 系）
   name: claude-sonnet-5
   max_tokens: 16000
-
-  # thinking: disabled | adaptive
-  #   disabled … 追加の推論トークンを使わない（既定・最も安定＆安価）
-  #   adaptive … 判読が難しい手書きが多い場合はこちらを試す
   thinking: disabled
-
-  # 推論の深さ。thinking: adaptive のときだけ意味を持つ。
-  #   low | medium | high | xhigh | max（null なら送信しない）
   effort: null
-
-  # temperature は Claude Sonnet 5 / Opus 5 など最新世代では
-  # 廃止されており、送ると 400 エラーになります（README 参照）。
-  # 旧世代モデル（例: claude-sonnet-4-5）を使う場合のみ 0 を指定してください。
-  temperature: null
-
-  # tool の input_schema を strict モードで強制するか。
-  # モデルが strict 未対応の場合は自動で strict なしにフォールバックします。
+  temperature: null            # Sonnet 5 では送れない（README 参照）
   strict_tools: true
+  pdf_max_bytes: 20000000
+  image_dpi: 300
 
-  # PDF をそのまま送るか、画像に変換して送るかの閾値・設定
-  pdf_max_bytes: 20000000   # これを超える PDF は最初から画像フォールバック
-  image_dpi: 300            # 画像フォールバック時の解像度
+# 5段階評価のラベル（全設問で共通なので YAML のアンカーで使い回す）
+x-scale5: &scale5
+  1: 非常に不満足
+  2: やや不満足
+  3: どちらともいえない
+  4: やや満足
+  5: 非常に満足
 
 # -----------------------------------------------------------------------------
 # 設問定義
-# -----------------------------------------------------------------------------
-# id      : 設問ID（Excel の列名・JSON のキーになる。重複不可）
-# type    : single_choice | multi_choice | free_text | number
-# text    : 設問文（プロンプトと Excel ヘッダに使われる）
-# choices : single_choice / multi_choice のときは必須
-# unit    : number のときの単位（任意・プロンプトのヒントになる）
-# note    : 読み取り時の注意書き（任意・プロンプトにそのまま渡される）
+#   type: single_choice | multi_choice | free_text | number | rating
+#   rating は scale（[最小, 最大]）と labels を持ち、
+#   「丸が付いた数字」を数値として抽出 → 平均・中央値・段階別件数を集計する
 # -----------------------------------------------------------------------------
 questions:
-  - id: Q1
-    type: single_choice
-    text: 貴社の業種は？
-    choices: [製造業, 商社, その他]
 
-  - id: Q2
-    type: single_choice
-    text: CRA対応の進捗状況
-    choices: [未着手, 検討中, 着手済, 完了]
-
-  - id: Q3
-    type: multi_choice
-    text: 関心のある規制
-    choices: [CRA, NIS2, JC-STAR, EU Data Act]
-
-  - id: Q4
+  # === 1 基本情報（2ページ目）===============================================
+  - id: Q1_1
     type: free_text
-    text: 現在の課題
-    note: 手書きの自由記述。要約せず、読み取れたまま raw_text に入れること。
+    text: 所属部署
+    note: 部署名の略称・アルファベット表記が多い。読めたまま記入すること。
 
-  - id: Q5
-    type: number
-    text: 対象製品数
-    unit: 製品
+  - id: Q1_2
+    type: free_text
+    text: 役職／職位
+    note: 「なし」と書かれている場合はその文字列をそのまま value に入れる（未記入ではない）。
+
+  - id: Q1_3
+    type: single_choice
+    text: CRA自己宣言の経験
+    choices: [今回が初めて, 過去に1回, 過去に複数回]
+    note: チェックボックス（□）にレ点。1つだけ選ぶ設問。
+
+  # === 2 ワークショップ全体の評価（2〜3ページ目）=============================
+  - id: Q2_1
+    type: rating
+    text: ワークショップ全体の満足度
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q2_2
+    type: rating
+    text: ワークショップの目的・内容は分かりやすかったですか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q2_3
+    type: rating
+    text: 時間配分は適切でしたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q2_4
+    type: rating
+    text: ファシリテーション（進行・説明）に満足していますか
+    scale: [1, 5]
+    labels: *scale5
+
+  # === 3 理解度・学び（3ページ目）===========================================
+  - id: Q3_1
+    type: rating
+    text: CRA自己宣言の目的について理解できましたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q3_2
+    type: rating
+    text: CRA自己宣言の進め方（プロセス）について理解できましたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q3_3
+    type: rating
+    text: CRA自己宣言が自分の業務に与える影響や意義をイメージできましたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q3_4
+    type: free_text
+    text: ワークショップを通じて新たに気づいた点や学び（自由記述）
+
+  # === 4 実践への意欲・不安（4ページ目）======================================
+  - id: Q4_1
+    type: rating
+    text: ワークショップ参加後、CRA自己宣言を実施してみようと思えますか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q4_2
+    type: free_text
+    text: CRA自己宣言の実施にあたり、現時点での不安や懸念（自由記述）
+
+  - id: Q4_3
+    type: free_text
+    text: CRA自己宣言の実施を円滑に進めるために、会社／組織に期待するサポート（自由記述）
+
+  # === 5 コンテンツ・資料への評価（4〜5ページ目）=============================
+  - id: Q5_1
+    type: rating
+    text: 説明資料（スライド・配布物）は分かりやすかったですか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q5_2
+    type: rating
+    text: 関連知識の紹介（サイバーセキュリティ全般）は参考になりましたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q5_3
+    type: free_text
+    text: 今後、追加してほしいテーマや事例（自由記述）
+
+  # === 6 ワークショップの進め方について（5ページ目）===========================
+  - id: Q6_1
+    type: rating
+    text: 講義の速さは適切でしたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q6_2
+    type: rating
+    text: グループディスカッションは有意義でしたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q6_3
+    type: rating
+    text: 発言しやすい雰囲気でしたか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q6_4
+    type: free_text
+    text: 進行方法について、良かった点・改善してほしい点（自由記述）
+
+  # === 7 今後への要望（6ページ目）===========================================
+  - id: Q7_1
+    type: free_text
+    text: CRA自己宣言に関するフォロー研修・説明会で希望する内容（自由記述）
+
+  - id: Q7_2
+    type: rating
+    text: 今回のワークショップを他の同僚に勧めたいと思いますか
+    scale: [1, 5]
+    labels: *scale5
+
+  - id: Q7_3
+    type: free_text
+    text: その他、ご意見・ご要望（自由記述）

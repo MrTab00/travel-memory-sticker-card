@@ -130,6 +130,29 @@ def normalize_answer(q: Question, raw: Any) -> dict[str, Any]:
                 selected.append(matched)
         value = selected
 
+    elif q.type == "rating":
+        candidate = value if value is not None else (raw_text if status == "answered" else None)
+        parsed = _parse_number(candidate)
+        if candidate is None:
+            value = None
+        elif parsed is None or not float(parsed).is_integer():
+            flags.append("rating_unparsable")
+            confidence = "low"
+            if raw_text is None:
+                raw_text = str(value)
+            value = None
+        elif not (q.scale_min <= int(parsed) <= q.scale_max):
+            flags.append(f"rating_out_of_range:{int(parsed)}")
+            confidence = "low"
+            if raw_text is None:
+                raw_text = str(value)
+            value = None
+        else:
+            if value is None:
+                flags.append("rating_from_raw_text")
+                confidence = _lower_confidence(confidence, "medium")
+            value = int(parsed)
+
     elif q.type == "number" and value is not None:
         parsed = _parse_number(value)
         if parsed is None:
@@ -171,6 +194,34 @@ def normalize_answer(q: Question, raw: Any) -> dict[str, Any]:
         "page": page,
         "flags": flags,
     }
+
+
+def postprocess_record(questions, answers: dict[str, Any], enabled: bool = True) -> None:
+    """回答者単位の整合性チェック（全設問を読み終えてから実行する）。
+
+    5段階評価がすべて最低値で、かつ自由記述が書かれている回答は、
+    尺度の向きを取り違えている／読み取りが反転している可能性がある。
+    値は書き換えず、confidence を下げて「要確認」シートに出す。
+    """
+    if not enabled:
+        return
+
+    scored = [
+        (q, answers[q.id])
+        for q in questions
+        if q.is_rating and isinstance(answers.get(q.id, {}).get("value"), int)
+    ]
+    if len(scored) < 3 or not all(a["value"] == q.scale_min for q, a in scored):
+        return
+    has_free_text = any(
+        answers.get(q.id, {}).get("value") for q in questions if q.type == "free_text"
+    )
+    if not has_free_text:
+        return
+
+    for _, answer in scored:
+        answer["flags"].append("uniform_min_rating")
+        answer["confidence"] = _lower_confidence(answer["confidence"], "medium")
 
 
 def display_value(q: Question, answer: dict[str, Any]) -> Any:

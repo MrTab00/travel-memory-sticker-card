@@ -12,7 +12,7 @@ from typing import Any, Callable
 import anthropic
 
 from .config import Config
-from .normalize import normalize_answer
+from .normalize import normalize_answer, postprocess_record
 from .pdf_utils import Respondent, pdf_document_block, render_page_images
 from .prompts import SYSTEM_PROMPT, build_user_instruction
 from .schema import RESPONDENT_NAME_KEY, TOOL_NAME, build_tool
@@ -221,6 +221,9 @@ class Extractor:
             data = json.loads(data)
 
         answers = {q.id: normalize_answer(q, data.get(q.id)) for q in self.config.questions}
+        postprocess_record(
+            self.config.questions, answers, self.config.meta.flag_uniform_min_ratings
+        )
         respondent_name = data.get(RESPONDENT_NAME_KEY)
 
         return {

@@ -8,8 +8,9 @@ from typing import Any
 
 import yaml
 
-QUESTION_TYPES = ("single_choice", "multi_choice", "free_text", "number")
+QUESTION_TYPES = ("single_choice", "multi_choice", "free_text", "number", "rating")
 CHOICE_TYPES = ("single_choice", "multi_choice")
+MAX_RATING_STEPS = 10
 VALID_LAYOUTS = ("auto", "per_respondent", "single_file")
 VALID_THINKING = ("disabled", "adaptive")
 VALID_EFFORT = ("low", "medium", "high", "xhigh", "max")
@@ -27,10 +28,26 @@ class Question:
     choices: tuple[str, ...] = ()
     unit: str | None = None
     note: str | None = None
+    scale_min: int = 1
+    scale_max: int = 5
+    scale_labels: tuple[tuple[int, str], ...] = ()
 
     @property
     def is_choice(self) -> bool:
         return self.type in CHOICE_TYPES
+
+    @property
+    def is_rating(self) -> bool:
+        return self.type == "rating"
+
+    @property
+    def scale_values(self) -> tuple[int, ...]:
+        return tuple(range(self.scale_min, self.scale_max + 1))
+
+    def scale_label(self, value: int) -> str:
+        """1 → '1：非常に不満足' のような表示名。ラベル未定義なら数字のみ。"""
+        label = dict(self.scale_labels).get(value)
+        return f"{value}：{label}" if label else str(value)
 
     @property
     def label(self) -> str:
@@ -55,6 +72,7 @@ class Meta:
     survey_name: str = "アンケート"
     pages_per_respondent: int = 6
     layout: str = "auto"
+    flag_uniform_min_ratings: bool = True
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,31 @@ def _parse_question(raw: Any, index: int) -> Question:
     elif choices:
         raise ConfigError(f"{where} ({qid}): type={qtype} では choices を指定できません。")
 
+    scale_min, scale_max = 1, 5
+    scale_labels: tuple[tuple[int, str], ...] = ()
+    if qtype == "rating":
+        raw_scale = data.get("scale", [1, 5])
+        if not isinstance(raw_scale, list) or len(raw_scale) != 2:
+            raise ConfigError(f"{where} ({qid}): scale は [最小, 最大] の形式で指定してください。")
+        scale_min, scale_max = int(raw_scale[0]), int(raw_scale[1])
+        if scale_min >= scale_max:
+            raise ConfigError(f"{where} ({qid}): scale は 最小 < 最大 にしてください。")
+        if scale_max - scale_min + 1 > MAX_RATING_STEPS:
+            raise ConfigError(f"{where} ({qid}): scale の段階数は {MAX_RATING_STEPS} 以下にしてください。")
+        raw_labels = _as_mapping(data.get("labels"), f"{where}.labels")
+        labels: list[tuple[int, str]] = []
+        for key, value in raw_labels.items():
+            try:
+                number = int(key)
+            except (TypeError, ValueError):
+                raise ConfigError(f"{where} ({qid}): labels のキーは数字にしてください（{key!r}）。") from None
+            if not scale_min <= number <= scale_max:
+                raise ConfigError(f"{where} ({qid}): labels のキー {number} が scale の範囲外です。")
+            labels.append((number, str(value).strip()))
+        scale_labels = tuple(sorted(labels))
+    elif "scale" in data or "labels" in data:
+        raise ConfigError(f"{where} ({qid}): scale / labels は type=rating でのみ指定できます。")
+
     unit = data.get("unit")
     note = data.get("note")
     return Question(
@@ -117,6 +160,9 @@ def _parse_question(raw: Any, index: int) -> Question:
         choices=choices,
         unit=str(unit).strip() if unit else None,
         note=str(note).strip() if note else None,
+        scale_min=scale_min,
+        scale_max=scale_max,
+        scale_labels=scale_labels,
     )
 
 
@@ -166,6 +212,9 @@ def _parse_meta(raw: Any) -> Meta:
         survey_name=str(data.get("survey_name", defaults.survey_name)).strip(),
         pages_per_respondent=pages,
         layout=layout,
+        flag_uniform_min_ratings=bool(
+            data.get("flag_uniform_min_ratings", defaults.flag_uniform_min_ratings)
+        ),
     )
 
 
