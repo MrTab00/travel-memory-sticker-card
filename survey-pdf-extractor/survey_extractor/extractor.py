@@ -231,6 +231,8 @@ class Extractor:
             "respondent_id": respondent.id,
             "respondent_name": respondent_name if isinstance(respondent_name, str) else None,
             "source_file": respondent.source_file.name,
+            "page_marker": respondent.marker,
+            "pages": list(respondent.pages),
             "page_start": respondent.page_start,
             "page_count": respondent.page_count,
             "model": response.model,

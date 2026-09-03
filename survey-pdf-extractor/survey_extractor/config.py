@@ -11,7 +11,7 @@ import yaml
 QUESTION_TYPES = ("single_choice", "multi_choice", "free_text", "number", "rating")
 CHOICE_TYPES = ("single_choice", "multi_choice")
 MAX_RATING_STEPS = 10
-VALID_LAYOUTS = ("auto", "per_respondent", "single_file")
+VALID_LAYOUTS = ("auto", "per_respondent", "single_file", "by_page_marker")
 VALID_THINKING = ("disabled", "adaptive")
 VALID_EFFORT = ("low", "medium", "high", "xhigh", "max")
 
@@ -73,6 +73,9 @@ class Meta:
     pages_per_respondent: int = 6
     layout: str = "auto"
     flag_uniform_min_ratings: bool = True
+    # 用紙のどこに手書きの回答者番号があるか（ページ幅・高さに対する割合で x0,y0,x1,y1）
+    marker_region: tuple[float, float, float, float] = (0.62, 0.0, 1.0, 0.14)
+    respondent_id_prefix: str = "No"
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,13 @@ def _parse_meta(raw: Any) -> Meta:
     if pages < 1:
         raise ConfigError("meta.pages_per_respondent は 1 以上にしてください。")
 
+    raw_region = data.get("marker_region", list(defaults.marker_region))
+    if not isinstance(raw_region, list) or len(raw_region) != 4:
+        raise ConfigError("meta.marker_region は [x0, y0, x1, y1]（0〜1 の割合）で指定してください。")
+    region = tuple(float(v) for v in raw_region)
+    if not all(0.0 <= v <= 1.0 for v in region) or region[0] >= region[2] or region[1] >= region[3]:
+        raise ConfigError("meta.marker_region は 0〜1 の範囲で x0<x1, y0<y1 にしてください。")
+
     return Meta(
         survey_name=str(data.get("survey_name", defaults.survey_name)).strip(),
         pages_per_respondent=pages,
@@ -215,6 +225,10 @@ def _parse_meta(raw: Any) -> Meta:
         flag_uniform_min_ratings=bool(
             data.get("flag_uniform_min_ratings", defaults.flag_uniform_min_ratings)
         ),
+        marker_region=region,  # type: ignore[arg-type]
+        respondent_id_prefix=str(
+            data.get("respondent_id_prefix", defaults.respondent_id_prefix)
+        ).strip(),
     )
 
 

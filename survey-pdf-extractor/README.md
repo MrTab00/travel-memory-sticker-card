@@ -108,16 +108,61 @@ input/
   回答者B.pdf
 ```
 
-**(b) 全員が1ファイル** — `meta.pages_per_respondent`（既定 6）ごとに自動で分割します。
-回答者IDは `ファイル名_01`, `ファイル名_02` … になります。
+**(b) 全員が1ファイル** — 分け方は2通りあります。
 
 ```
 input/
   アンケート全員分.pdf   ← 120ページ = 20名 × 6ページ
 ```
 
-どちらかは `meta.layout: auto` が自動判定します（判定結果は実行時に表示されます）。
-明示したい場合は `--layout per_respondent` / `--layout single_file` を付けてください。
+| layout | 分け方 | 向いている場合 |
+|---|---|---|
+| `by_page_marker`（**推奨・既定**） | **用紙右上の手書き番号**でグループ化 | 回収時に用紙へ通し番号を書いている場合 |
+| `single_file` | `pages_per_respondent`（既定 6）ごとに機械的に分割 | 番号を書いていない場合 |
+
+`by_page_marker` は各ページの**右上の隅だけ**を切り出して番号を読み取ります（1ページ約5KB、
+コストはごくわずか）。固定ページ数での分割と違い、**1名分がページ抜け・重複・順番違いに
+なっても以降の全員がずれることがなく**、「6ページ揃っているか」の検算にもなります。
+
+```bash
+# まずグループ分けだけ確認する（抽出はしない）
+python main.py --show-groups
+
+# 出力例
+# 回答者ID        ページ                 ページ数  右上の番号
+# ------------------------------------------------------------
+# No01           p1-6                      6    1
+# No02           p7-12                     6    2
+# No03           p13-18                    6    3
+```
+
+- 番号が読めなかったページは、直前のページと同じ回答者に含めたうえで**必ず警告**を出します
+- ページ数が想定と違う／ページが連続していないグループも警告に出ます
+- 読み取り結果は `output/{ファイル名}_page_markers.json` にキャッシュされ、次回以降は再利用します
+  （読み直すときは `--redetect-markers`）
+- 番号の位置が右上でない場合は `meta.marker_region: [x0, y0, x1, y1]`（0〜1 の割合）で調整
+
+`meta.layout: auto` にすると (a)/(b) を自動判定します（判定結果は実行時に表示）。
+CLI からは `--layout by_page_marker` / `per_respondent` / `single_file` で上書きできます。
+
+### PDF が大きくてアップロード・送信に失敗する場合
+
+**回答者の区切りで分割して、`input/` に複数ファイルとして置いてください。**
+複数ファイルでも回答者IDは重複しないよう自動で調整され、最後にまとめて1つの Excel になります。
+一部だけ先に処理し、残りを後から追加しても構いません（処理済みは自動でスキップされます）。
+
+```bash
+# 例: 30ページ（5名分）ずつ4分割する
+python -c "
+from pypdf import PdfReader, PdfWriter
+r = PdfReader('元ファイル.pdf')
+for i in range(0, len(r.pages), 30):
+    w = PdfWriter()
+    for p in r.pages[i:i+30]:
+        w.add_page(p)
+    w.write(f'input/part{i//30+1:02d}.pdf')
+"
+```
 
 ---
 
@@ -148,6 +193,8 @@ python main.py
 | `--images` | PDF 直送をやめ、最初から 300dpi の画像として送る |
 | `--model MODEL` | モデルを一時的に変更する |
 | `--layout` / `--pages` | 入力構成・1名あたりページ数を上書きする |
+| `--show-groups` | 回答者のグループ分けだけ表示して終了（`by_page_marker` の確認用） |
+| `--redetect-markers` | 右上の手書き番号を読み取り直す（キャッシュを無視） |
 | `--self-test` | API を使わずダミーデータでパイプラインを検証する |
 
 **再実行は安全です。** `output/raw/{回答者ID}.json` が既にある回答者は自動でスキップされるため、
@@ -280,6 +327,7 @@ survey-pdf-extractor/
 ├── requirements.txt
 └── survey_extractor/
     ├── config.py               questions.yaml の読み込み・検証
+    ├── markers.py              用紙右上の手書き番号の読み取りとグループ化
     ├── schema.py               設問定義 → tool use の input_schema
     ├── prompts.py              システムプロンプト・指示文
     ├── pdf_utils.py            PDF の列挙・分割・画像フォールバック

@@ -12,8 +12,18 @@ meta:
   # 1名あたりのページ数（表紙1ページ＋設問5ページ = 6）
   pages_per_respondent: 6
 
-  # auto | per_respondent | single_file
-  layout: auto
+  # auto | per_respondent | single_file | by_page_marker
+  #   by_page_marker … 用紙の右上に手書きされた回答者番号でページをグループ化する。
+  #                    ページ抜け・順番違いがあっても回答者がずれないので、
+  #                    全員分が1ファイルに入っている場合はこれを推奨。
+  layout: by_page_marker
+
+  # 手書き番号の位置（ページ幅・高さに対する割合で x0, y0, x1, y1）
+  # 既定は「右上の隅」。この範囲だけを切り出して読むので追加コストはごくわずか。
+  marker_region: [0.62, 0.0, 1.0, 0.14]
+
+  # by_page_marker で作る回答者IDの接頭辞（番号1 → No01）
+  respondent_id_prefix: "No"
 
   # 5段階評価がすべて最低値（1）で、かつ自由記述が書かれている回答者を
   # 「尺度の向きを取り違えた可能性あり」として要確認シートに出す

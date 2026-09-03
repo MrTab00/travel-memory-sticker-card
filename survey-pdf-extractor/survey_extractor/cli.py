@@ -10,11 +10,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import pricing
+from . import markers, pricing
 from .aggregate import write_excel
 from .config import Config, ConfigError, load_config
 from .extractor import ExtractionError, Extractor, load_records, save_record
-from .pdf_utils import PdfError, Respondent, discover_respondents
+from .markers import MarkerError
+from .pdf_utils import (
+    PdfError,
+    Respondent,
+    discover_respondents,
+    list_input_pdfs,
+    read_page_count,
+)
 from .schema import build_tool
 from .selftest import build_dummy_records
 
@@ -44,7 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--questions", default=DEFAULT_QUESTIONS, help="設問定義ファイル (既定: questions.yaml)")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="入力 PDF のディレクトリ (既定: input)")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="出力ディレクトリ (既定: output)")
-    parser.add_argument("--layout", choices=["auto", "per_respondent", "single_file"], help="入力 PDF の構成（questions.yaml を上書き）")
+    parser.add_argument("--layout", choices=["auto", "per_respondent", "single_file", "by_page_marker"], help="入力 PDF の構成（questions.yaml を上書き）")
+    parser.add_argument("--show-groups", action="store_true", help="回答者のグループ分けだけ表示して終了する（by_page_marker の確認用）")
+    parser.add_argument("--redetect-markers", action="store_true", help="右上の手書き番号を読み取り直す（キャッシュを無視）")
     parser.add_argument("--pages", type=int, help="1名あたりのページ数（questions.yaml を上書き）")
     parser.add_argument("--model", help="使用するモデル（questions.yaml を上書き）")
     parser.add_argument("--only", nargs="+", metavar="ID", help="指定した回答者IDだけ処理する")
@@ -105,6 +114,66 @@ def _select(respondents: list[Respondent], only: list[str] | None) -> list[Respo
     if missing:
         _log(f"※ 指定された回答者IDが見つかりません: {', '.join(sorted(missing))}")
     return selected
+
+
+def _discover_by_marker(
+    config: Config, input_dir: Path, output_dir: Path, args: argparse.Namespace
+) -> tuple[list[Respondent], list[str]]:
+    """用紙右上の手書き番号でページを回答者ごとにまとめる。"""
+    import anthropic
+
+    pdfs = list_input_pdfs(input_dir)
+    if not pdfs:
+        raise PdfError(f"{input_dir} に PDF が見つかりません。")
+
+    warnings: list[str] = []
+    respondents: list[Respondent] = []
+    client = None
+
+    for path in pdfs:
+        total = read_page_count(path)
+        cache = markers.cache_path(output_dir, path)
+        data = None if args.redetect_markers else markers.load_cache(cache)
+
+        if data is None:
+            _check_api_key()
+            if client is None:
+                client = anthropic.Anthropic(max_retries=0)
+            _log(f"{path.name}（全{total}ページ）の右上の番号を読み取ります…")
+            data = markers.MarkerDetector(config, client, _log).detect(path, total)
+            markers.save_cache(cache, data)
+            _log(f"  読み取り結果を {cache} に保存しました（次回はこれを再利用します）")
+        else:
+            warnings.append(f"{path.name}: 既存の番号読み取り結果を使用（{cache.name}）")
+
+        groups, group_warnings = markers.group_by_marker(data, config.meta.pages_per_respondent)
+        warnings.extend(f"{path.name}: {w}" for w in group_warnings)
+
+        prefix = config.meta.respondent_id_prefix
+        if len(pdfs) > 1:
+            prefix = f"{path.stem}_{prefix}"
+        respondents.extend(markers.respondents_from_groups(path, groups, prefix))
+
+    seen: set[str] = set()
+    for r in respondents:
+        if r.id in seen:
+            raise MarkerError(f"回答者IDが重複しています: {r.id}")
+        seen.add(r.id)
+
+    return respondents, warnings
+
+
+def _show_groups(respondents: list[Respondent]) -> None:
+    _log("")
+    _log("回答者ID        ページ                 ページ数  右上の番号")
+    _log("-" * 60)
+    for r in respondents:
+        flag = "" if r.page_count else "  ← ページなし"
+        _log(f"{r.id:<14} {r.page_label:<20} {r.page_count:>6}    {r.marker or '-'}{flag}")
+    _log("-" * 60)
+    _log(f"合計 {len(respondents)} 名 / {sum(r.page_count for r in respondents)} ページ")
+    _log("")
+    _log("このグループ分けで問題なければ、--show-groups を外して実行してください。")
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +306,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        respondents, warnings = discover_respondents(
-            Path(args.input), config.meta.layout, config.meta.pages_per_respondent
-        )
-    except PdfError as exc:
+        if config.meta.layout == "by_page_marker":
+            respondents, warnings = _discover_by_marker(config, Path(args.input), output_dir, args)
+        else:
+            respondents, warnings = discover_respondents(
+                Path(args.input), config.meta.layout, config.meta.pages_per_respondent
+            )
+    except (PdfError, MarkerError) as exc:
         _log(f"入力エラー: {exc}")
         return 2
 
     for warning in warnings:
         _log(f"※ {warning}")
+
+    if args.show_groups:
+        _show_groups(respondents)
+        return 0
     respondents = _select(respondents, args.only)
     if not respondents:
         _log("処理対象の回答者がいません。")

@@ -7,6 +7,7 @@ import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from pypdf import PdfReader, PdfWriter
 
@@ -24,13 +25,31 @@ class Respondent:
 
     id: str
     source_file: Path
-    page_start: int  # 元 PDF 内での開始ページ（1始まり）
-    page_count: int
+    pages: tuple[int, ...]  # 元 PDF 内のページ番号（1始まり）
     pdf_bytes: bytes
+    marker: str | None = None  # 用紙右上の手書き番号（検出した場合）
+
+    @property
+    def page_start(self) -> int:
+        return self.pages[0] if self.pages else 1
+
+    @property
+    def page_count(self) -> int:
+        return len(self.pages)
 
     @property
     def page_range(self) -> tuple[int, int]:
-        return (self.page_start, self.page_start + self.page_count - 1)
+        return (self.pages[0], self.pages[-1]) if self.pages else (1, 1)
+
+    @property
+    def is_contiguous(self) -> bool:
+        return list(self.pages) == list(range(self.pages[0], self.pages[-1] + 1))
+
+    @property
+    def page_label(self) -> str:
+        if self.is_contiguous:
+            return f"p{self.pages[0]}-{self.pages[-1]}"
+        return "p" + ",".join(str(p) for p in self.pages)
 
 
 def _natural_key(path: Path) -> list:
@@ -45,18 +64,21 @@ def list_input_pdfs(input_dir: Path) -> list[Path]:
     return sorted(pdfs, key=_natural_key)
 
 
-def _read_pages(path: Path) -> int:
+def read_page_count(path: Path) -> int:
     try:
         return len(PdfReader(str(path)).pages)
     except Exception as exc:  # pragma: no cover - 破損 PDF
         raise PdfError(f"PDF を読み込めません: {path.name} ({exc})") from exc
 
 
-def _slice_pdf(path: Path, start_index: int, count: int) -> bytes:
+def slice_pdf(path: Path, page_numbers: Iterable[int]) -> bytes:
+    """指定ページ（1始まり）だけを抜き出した PDF のバイト列を返す。"""
     reader = PdfReader(str(path))
     writer = PdfWriter()
-    for i in range(start_index, min(start_index + count, len(reader.pages))):
-        writer.add_page(reader.pages[i])
+    for number in page_numbers:
+        index = number - 1
+        if 0 <= index < len(reader.pages):
+            writer.add_page(reader.pages[index])
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
@@ -83,7 +105,7 @@ def discover_respondents(
     if not pdfs:
         raise PdfError(f"{input_dir} に PDF が見つかりません。")
 
-    page_counts = {p: _read_pages(p) for p in pdfs}
+    page_counts = {p: read_page_count(p) for p in pdfs}
 
     resolved = layout
     if layout == "auto":
@@ -107,8 +129,7 @@ def discover_respondents(
                 Respondent(
                     id=_sanitize_id(path.stem),
                     source_file=path,
-                    page_start=1,
-                    page_count=pages,
+                    pages=tuple(range(1, pages + 1)),
                     pdf_bytes=path.read_bytes(),
                 )
             )
@@ -120,17 +141,18 @@ def discover_respondents(
                 warnings.append(
                     f"{path.name}: 全{total}ページが {pages_per_respondent} で割り切れません。"
                     f"最後の1名分は {total % pages_per_respondent} ページになります。"
+                    "（右上の手書き番号があるなら layout: by_page_marker を推奨）"
                 )
             for i in range(chunks):
                 start = i * pages_per_respondent
                 count = min(pages_per_respondent, total - start)
+                numbers = tuple(range(start + 1, start + count + 1))
                 respondents.append(
                     Respondent(
                         id=_sanitize_id(f"{path.stem}_{i + 1:02d}"),
                         source_file=path,
-                        page_start=start + 1,
-                        page_count=count,
-                        pdf_bytes=_slice_pdf(path, start, count),
+                        pages=numbers,
+                        pdf_bytes=slice_pdf(path, numbers),
                     )
                 )
 
