@@ -22,31 +22,27 @@ step "Python を確認しています"
 
 # PATH の通っていない場所に入っていることがあるので、候補を順に探す
 # （macOS 標準の /usr/bin/python3 は 3.9 で古く、更新できない）
-find_python() {
-    local candidate
-    for version in 3.13 3.12 3.11 3.10; do
+list_pythons() {
+    local candidate resolved seen=""
+    for version in 3.13 3.12 3.11 3.10 ""; do
         for candidate in \
             "python$version" \
             "/Library/Frameworks/Python.framework/Versions/$version/bin/python3" \
             "/opt/homebrew/bin/python$version" \
             "/usr/local/bin/python$version"
         do
-            if command -v "$candidate" >/dev/null 2>&1 &&
-               "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null; then
-                printf '%s' "$candidate"
-                return 0
-            fi
+            command -v "$candidate" >/dev/null 2>&1 || continue
+            "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null || continue
+            resolved=$("$candidate" -c 'import sys; print(sys.executable)' 2>/dev/null) || continue
+            case " $seen " in *" $resolved "*) continue ;; esac
+            seen="$seen $resolved"
+            printf '%s\n' "$candidate"
         done
     done
-    if command -v python3 >/dev/null 2>&1 &&
-       python3 -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null; then
-        printf 'python3'
-        return 0
-    fi
-    return 1
 }
 
-if ! PYBIN=$(find_python); then
+PYTHONS=$(list_pythons || true)
+if [ -z "$PYTHONS" ]; then
     CURRENT="（python3 が見つかりません）"
     if command -v python3 >/dev/null 2>&1; then
         CURRENT="現在の python3 は $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])') です（$(command -v python3)）"
@@ -69,18 +65,70 @@ if ! PYBIN=$(find_python); then
        bash setup_mac.sh"
 fi
 
-PY_VERSION=$("$PYBIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
-ok "Python $PY_VERSION ($(command -v "$PYBIN"))"
+PY_COUNT=$(printf '%s\n' "$PYTHONS" | grep -c . || true)
+PY_FIRST=$(printf '%s\n' "$PYTHONS" | head -1)
+ok "$("$PY_FIRST" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3])') ($PY_FIRST)"
+[ "$PY_COUNT" -gt 1 ] && ok "ほかに $((PY_COUNT - 1)) 個の候補あり（失敗したら自動で切り替えます）"
 
 # --- 2. 仮想環境 ---------------------------------------------------------
 step "仮想環境 (.venv) を用意しています"
-if [ -x .venv/bin/python ]; then
+
+ERR_LOG="setup_error.log"
+
+# venv 作成 → 失敗したら pip 抜きで作り直して pip を入れ直す
+# （python.org 版などで ensurepip が壊れていることがあるため）
+try_make_venv() {
+    local py="$1"
+    rm -rf .venv
+    if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
+        return 0
+    fi
+
+    warn "標準の方法では作れませんでした。pip を後から入れる方式で再試行します"
+    rm -rf .venv
+    "$py" -m venv --without-pip .venv >>"$ERR_LOG" 2>&1 || return 1
+
+    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1; then
+        return 0
+    fi
+    warn "ensurepip も使えないため、pip を直接ダウンロードします"
+    if curl -fsSL https://bootstrap.pypa.io/get-pip.py -o .venv/get-pip.py >>"$ERR_LOG" 2>&1 &&
+       .venv/bin/python .venv/get-pip.py >>"$ERR_LOG" 2>&1; then
+        rm -f .venv/get-pip.py
+        return 0
+    fi
+    return 1
+}
+
+if [ -x .venv/bin/python ] && [ -x .venv/bin/pip ]; then
     ok "既存の .venv を再利用します"
+    VENV_PY=".venv/bin/python"
 else
-    "$PYBIN" -m venv .venv || die "仮想環境を作成できませんでした。ディスクの空き容量と書き込み権限をご確認ください。"
-    ok ".venv を作成しました"
+    : > "$ERR_LOG"
+    VENV_PY=""
+    while IFS= read -r py; do
+        [ -n "$py" ] || continue
+        if try_make_venv "$py"; then
+            VENV_PY=".venv/bin/python"
+            ok ".venv を作成しました（$("$VENV_PY" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3])')）"
+            break
+        fi
+        warn "$py では作成できませんでした。次の Python を試します"
+    done <<< "$PYTHONS"
+
+    if [ -z "$VENV_PY" ]; then
+        printf "\n--- 詳細ログ（末尾30行）-------------------------------\n" >&2
+        tail -30 "$ERR_LOG" >&2
+        printf -- "-------------------------------------------------------\n" >&2
+        die "仮想環境を作成できませんでした。
+  上の詳細ログ（$ERR_LOG に全文あり）をそのまま共有してください。
+
+  よくある原因:
+    ・Python のインストールが不完全 → 入れ直す、または brew install python@3.12
+    ・社内ネットワークで bootstrap.pypa.io に到達できない"
+    fi
+    rm -f "$ERR_LOG"
 fi
-VENV_PY=".venv/bin/python"
 
 # --- 3. 依存関係 ---------------------------------------------------------
 step "必要なライブラリをインストールしています（数分かかります）"
