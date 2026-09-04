@@ -78,27 +78,41 @@ ERR_LOG="setup_error.log"
 # truststore を含まない最後の pip。新しい pip が動かない環境の逃げ道に使う
 PIP_WHEEL_NAME="pip-24.0-py3-none-any.whl"
 PIP_WHEEL_URL="https://files.pythonhosted.org/packages/py3/p/pip/$PIP_WHEEL_NAME"
+PIP_FIX_APPLIED=0
 
-# venv 作成 → 失敗したら pip 抜きで作り直して pip を入れ直す
-# （python.org 版などで ensurepip が壊れていることがあるため）
+# venv を作る。失敗したら手を替えて再試行する。
+#
+# 背景: pip 24.2 以降は macOS のキーチェーン連携 (truststore) を既定で使うが、
+# platform.mac_ver() が空文字を返す Mac ではその読み込みが ValueError で落ちる。
+# ensurepip も get-pip.py も内部で pip を動かすため、全部まとめて失敗する。
+# pip 公式の逃げ道 --use-deprecated=legacy-certs（環境変数 PIP_USE_DEPRECATED）で
+# truststore を使わせないようにすれば回避できる。
 try_make_venv() {
     local py="$1"
+
+    # (1) 素直に作る
     rm -rf .venv
     if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
         return 0
     fi
 
-    warn "標準の方法では作れませんでした。pip を後から入れる方式で再試行します"
+    # (2) truststore を使わせずに作り直す（この Mac ではこれで通るはず）
+    warn "pip の証明書処理 (truststore) で失敗しました。従来方式に切り替えて再試行します"
+    export PIP_USE_DEPRECATED=legacy-certs
+    PIP_FIX_APPLIED=1
+    rm -rf .venv
+    if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
+        return 0
+    fi
+
+    # (3) pip 抜きで作ってから ensurepip
     rm -rf .venv
     "$py" -m venv --without-pip .venv >>"$ERR_LOG" 2>&1 || return 1
-
     if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1; then
         return 0
     fi
-    # 新しい pip は macOS の証明書ストア連携 (truststore) を使うが、
-    # platform.mac_ver() が空を返す環境ではその読み込みで落ちる。
-    # ensurepip も get-pip.py も内部で新しい pip を動かすため同じ理由で失敗する。
-    # → truststore 導入前の pip 24.0 を wheel から直接入れる（pip 不要）
+
+    # (4) truststore 導入前の pip 24.0 を wheel から直接入れる（pip 不要）
     warn "ensurepip も使えないため、pip 24.0 を直接導入します"
     local whl=".venv/$PIP_WHEEL_NAME"
     if curl -fsSL -o "$whl" "$PIP_WHEEL_URL" >>"$ERR_LOG" 2>&1 &&
@@ -107,6 +121,7 @@ try_make_venv() {
         return 0
     fi
 
+    # (5) 最後の手段
     warn "get-pip.py も試します"
     if curl -fsSL https://bootstrap.pypa.io/get-pip.py -o .venv/get-pip.py >>"$ERR_LOG" 2>&1 &&
        .venv/bin/python .venv/get-pip.py >>"$ERR_LOG" 2>&1; then
@@ -127,6 +142,7 @@ else
         if try_make_venv "$py"; then
             VENV_PY=".venv/bin/python"
             ok ".venv を作成しました（$("$VENV_PY" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3])')）"
+            [ "$PIP_FIX_APPLIED" = "1" ] && ok "この環境向けに PIP_USE_DEPRECATED=legacy-certs を適用しました"
             break
         fi
         warn "$py では作成できませんでした。次の Python を試します"
