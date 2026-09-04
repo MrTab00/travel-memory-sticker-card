@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import markers, pricing
+from . import env, markers, pricing
 from .aggregate import write_excel
 from .config import Config, ConfigError, load_config
 from .extractor import ExtractionError, Extractor, load_records, save_record
@@ -99,10 +99,17 @@ def _report_excel(config: Config, records: list[dict[str, Any]], path: Path) -> 
 
 
 def _check_api_key() -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        _log("環境変数 ANTHROPIC_API_KEY が設定されていません。")
-        _log("  export ANTHROPIC_API_KEY='sk-ant-...' を実行してから再度お試しください。")
-        raise SystemExit(2)
+    if os.environ.get(env.KEY_NAME):
+        return
+    path = env.env_file_path()
+    _log(f"APIキーが設定されていません（{env.KEY_NAME}）。")
+    if path.is_file():
+        _log(f"  {path} を開き、次の行にキーを書いてください:")
+        _log(f"      {env.KEY_NAME}=sk-ant-...")
+    else:
+        _log("  次のコマンドで設定ファイルを作り、キーを書いてください:")
+        _log("      cp .env.example .env && chmod 600 .env && open -e .env")
+    raise SystemExit(2)
 
 
 def _select(respondents: list[Respondent], only: list[str] | None) -> list[Respondent]:
@@ -283,6 +290,13 @@ def _run_extraction(
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    # .env があればキーを読み込む（環境変数が既にあればそちらを優先）
+    if env.load_env_file():
+        path = env.env_file_path()
+        _log(f"APIキー   : {path.name} から読み込みました（{env.mask(os.environ[env.KEY_NAME])}）")
+        if env.is_world_readable(path):
+            _log(f"※ {path.name} が他のユーザーからも読める権限です。chmod 600 {path.name} を推奨します。")
 
     try:
         config = _apply_overrides(load_config(args.questions), args)

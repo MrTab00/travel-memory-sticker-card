@@ -34,7 +34,9 @@ bash setup_mac.sh          # Python の確認・ライブラリ導入・動作�
 続けて、キーの設定と実行:
 
 ```bash
-export ANTHROPIC_API_KEY='sk-ant-...'    # このターミナルの間だけ有効
+# APIキーは .env ファイルに書く（ターミナルに入力しない＝履歴に残らない）
+open -e .env               # setup_mac.sh が作成済み。最終行を次の形にして保存
+                           #   ANTHROPIC_API_KEY=sk-ant-...
 
 # スキャンPDFを input/ に入れる（Finder からドラッグ＆ドロップで可）
 open .
@@ -56,7 +58,7 @@ open output                # 結果のフォルダを Finder で開く
 | `Python 3.9 では動きません` | 同上。macOS 標準の python3 が古い場合があります |
 | `./run.sh: Permission denied` | `chmod +x run.sh setup_mac.sh` を実行 |
 | `pip install` が SSL や proxy で失敗 | 社内ネットワークの可能性。`--proxy http://<プロキシ:ポート>` を付ける |
-| キーを毎回入れるのが面倒 | `echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.zshrc` を一度だけ実行し、ターミナルを開き直す |
+| `.env` が見つからない | `cp .env.example .env && chmod 600 .env` を実行 |
 
 ---
 
@@ -70,8 +72,8 @@ py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-$env:ANTHROPIC_API_KEY = "sk-ant-..."     # このウィンドウだけ有効
-# 恒久的に設定する場合: setx ANTHROPIC_API_KEY "sk-ant-..." （設定後は新しいウィンドウで実行）
+Copy-Item .env.example .env
+notepad .env               # ANTHROPIC_API_KEY=sk-ant-... の行を書いて保存
 ```
 
 **macOS / Linux**
@@ -84,10 +86,23 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-export ANTHROPIC_API_KEY='sk-ant-...'
+cp .env.example .env && chmod 600 .env
+$EDITOR .env               # ANTHROPIC_API_KEY=sk-ant-... の行を書いて保存
 ```
 
-API キーはコードに書かず、必ず環境変数 `ANTHROPIC_API_KEY` から読みます。
+### APIキーの扱い
+
+キーはコードに書かず、**`.env` ファイル**または環境変数 `ANTHROPIC_API_KEY` から読みます。
+
+- `export ANTHROPIC_API_KEY=...` をターミナルに打つと、キーがシェルの履歴
+  （`~/.zsh_history` 等）に残ります。それを避けるため、既定では `.env` に書く方式です
+- `.env` は `.gitignore` 済みで、権限 600（自分だけが読める）に設定されます。
+  緩んでいた場合は `./run.sh` が自動で直します
+- `.env` は `source` されません。中身は `KEY=VALUE` として読むだけなので、
+  書かれた文字列がコマンドとして実行されることはありません
+- 環境変数が設定されていれば、そちらが優先されます（CI などで使う場合）
+- 実行ログにキーは出ません（`sk-ant-...fXYZ` のように伏せ字で表示）
+- **必要なときだけ書き、終わったら中身を消す**運用でも動きます
 
 動作確認（API を呼ばず、課金も発生しません）:
 
@@ -379,7 +394,7 @@ output/
 
 | 症状 | 対応 |
 |---|---|
-| `環境変数 ANTHROPIC_API_KEY が設定されていません` | `export ANTHROPIC_API_KEY='sk-ant-...'` を実行 |
+| `APIキーが設定されていません` | `.env` を開き `ANTHROPIC_API_KEY=sk-ant-...` の行を書く |
 | `モデルまたはエンドポイントが見つかりません` | `questions.yaml` の `model.name` を確認。モデル文字列は公式ドキュメントで最新を確認してください |
 | `temperature` で 400 エラー | Claude Sonnet 5 / Opus 5 など最新世代では `temperature` は廃止されており、送ると 400 になります。既定では送信しません。どうしても `temperature: 0` を使いたい場合は旧世代モデル（例: `claude-sonnet-4-5`）を指定してください。なお本ツールは 400 の内容を見て `temperature` / `thinking` / `strict` などを自動で外して再試行します |
 | PDF が大きすぎる / ページが多すぎる | 自動で 300dpi の PNG に変換して送り直します（`--images` で最初から画像にすることも可能） |
@@ -402,11 +417,13 @@ output/
 survey-pdf-extractor/
 ├── main.py                     エントリポイント
 ├── setup_mac.sh                Mac 用セットアップ（bash setup_mac.sh）
+├── .env.example                APIキー設定ファイルのひな形（.env にコピーして使う）
 ├── run.sh                      実行用ラッパー（./run.sh --show-groups など）
 ├── questions.yaml              設問定義（★ここを書き換える）
 ├── requirements.txt
 └── survey_extractor/
     ├── config.py               questions.yaml の読み込み・検証
+    ├── env.py                  .env からの APIキー読み込み
     ├── markers.py              用紙右上の手書き番号の読み取りとグループ化
     ├── schema.py               設問定義 → tool use の input_schema
     ├── prompts.py              システムプロンプト・指示文
