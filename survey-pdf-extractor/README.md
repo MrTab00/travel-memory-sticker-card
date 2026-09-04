@@ -57,7 +57,8 @@ open output                # 結果のフォルダを Finder で開く
 | `使える Python (3.10 以上) が見つかりません` | macOS 標準の python3 は 3.9 で更新できません。`brew install python@3.12`、または [python.org](https://www.python.org/downloads/macos/) の「macOS 64-bit universal2 installer」を入れて `bash setup_mac.sh` を再実行（PATH が古いままでもスクリプトが新しい方を探します） |
 | `./run.sh: Permission denied` | `chmod +x run.sh setup_mac.sh` を実行 |
 | `pip install` が SSL や proxy で失敗 | 社内ネットワークの可能性。`--proxy http://<プロキシ:ポート>` を付ける |
-| `invalid literal for int() with base 10: ''`（`truststore` / `packaging/tags.py`） | `platform.mac_ver()` が空を返す Mac で起きます。pip は macOS のバージョンを wheel 判定と証明書処理の両方で使うため、両方が落ちます。`setup_mac.sh` が venv 内に補正（`sw_vers` から実バージョンを補う `.pth`）を入れて回避します |
+| `invalid literal for int() with base 10: ''`（`truststore` / `packaging/tags.py`） | **Python のインストールが壊れています**。`pyexpat` が読み込めず `import plistlib` が失敗し、`platform.mac_ver()` が空を返すため、pip の wheel 判定も証明書処理も落ちます（Homebrew の Python でよくある libexpat のシンボル不一致）。`setup_mac.sh` は壊れた Python を候補から自動で除外し、健全なものが1つも無ければ uv で自己完結の Python を用意します。根本的に直すなら `brew reinstall python@3.13` |
+| 確認コマンド | `python3.13 -c 'import platform; print(platform.mac_ver())'` — 空タプルなら壊れています |
 | `.env` が見つからない | `cp .env.example .env && chmod 600 .env` を実行 |
 
 ---

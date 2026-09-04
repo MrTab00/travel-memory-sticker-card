@@ -17,14 +17,40 @@ ok()   { printf "    %s✓%s %s\n" "$GREEN" "$NC" "$1"; }
 warn() { printf "    %s!%s %s\n" "$YELLOW" "$NC" "$1"; }
 die()  { printf "\n%sエラー:%s %s\n" "$RED" "$NC" "$1" >&2; exit 1; }
 
+ERR_LOG="setup_error.log"
+: > "$ERR_LOG"
+
 # --- 1. Python -----------------------------------------------------------
 step "Python を確認しています"
 
-# PATH の通っていない場所に入っていることがあるので、候補を順に探す
-# （macOS 標準の /usr/bin/python3 は 3.9 で古く、更新できない）
+# 使える Python を探す。
+# 見るべき点が2つある:
+#   1) PATH の通っていない場所に入っていることがある
+#      （macOS 標準の /usr/bin/python3 は 3.9 で古く、更新できない）
+#   2) インストールが壊れていることがある。特に Homebrew の Python で
+#      pyexpat が system の libexpat とシンボル不一致になると
+#      import plistlib が失敗し、platform.mac_ver() が空を返す。
+#      こうなると pip は wheel 判定も証明書処理もできず全滅するので、
+#      候補の時点で除外する。
+python_is_healthy() {
+    "$1" - <<'PYEOF' 2>/dev/null
+import sys
+
+ok = sys.version_info[:2] >= (3, 10)
+if ok and sys.platform == "darwin":
+    try:
+        import plistlib  # noqa: F401  (pyexpat が壊れているとここで落ちる)
+        import platform
+        ok = bool(platform.mac_ver()[0])
+    except Exception:
+        ok = False
+sys.exit(0 if ok else 1)
+PYEOF
+}
+
 list_pythons() {
     local candidate resolved seen=""
-    for version in 3.13 3.12 3.11 3.10 ""; do
+    for version in 3.13 3.12 3.14 3.11 3.10; do
         for candidate in \
             "python$version" \
             "/Library/Frameworks/Python.framework/Versions/$version/bin/python3" \
@@ -32,17 +58,99 @@ list_pythons() {
             "/usr/local/bin/python$version"
         do
             command -v "$candidate" >/dev/null 2>&1 || continue
-            "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null || continue
+            python_is_healthy "$candidate" || continue
             resolved=$("$candidate" -c 'import sys; print(sys.executable)' 2>/dev/null) || continue
             case " $seen " in *" $resolved "*) continue ;; esac
             seen="$seen $resolved"
             printf '%s\n' "$candidate"
         done
     done
+    for candidate in python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        python_is_healthy "$candidate" || continue
+        resolved=$("$candidate" -c 'import sys; print(sys.executable)' 2>/dev/null) || continue
+        case " $seen " in *" $resolved "*) continue ;; esac
+        seen="$seen $resolved"
+        printf '%s\n' "$candidate"
+    done
+}
+
+# 使える Python が1つも無い場合の逃げ道。
+# uv は自前の Python（libexpat も同梱）を持ってくるので、
+# Homebrew や system のライブラリが壊れていても影響を受けない。
+# wheel の判定も Rust 側で行うため platform.mac_ver() に依存しない。
+setup_with_uv() {
+    local uv_bin=""
+    if command -v uv >/dev/null 2>&1; then
+        uv_bin=$(command -v uv)
+    elif [ -x "$HOME/.local/bin/uv" ]; then
+        uv_bin="$HOME/.local/bin/uv"
+    else
+        warn "uv を導入します（1回だけ。~/.local/bin に入ります）"
+        curl -LsSf https://astral.sh/uv/install.sh 2>>"$ERR_LOG" | sh >>"$ERR_LOG" 2>&1 || return 1
+        uv_bin="$HOME/.local/bin/uv"
+    fi
+    [ -x "$uv_bin" ] || command -v "$uv_bin" >/dev/null 2>&1 || return 1
+    ok "uv: $("$uv_bin" --version 2>&1)"
+
+    warn "独立した Python 3.12 を取得しています（数分かかることがあります）"
+    printf '\n=== uv: python install ===\n' >>"$ERR_LOG"
+    "$uv_bin" python install 3.12 >>"$ERR_LOG" 2>&1 || return 1
+    rm -rf .venv
+    # --python-preference only-managed: システムや Homebrew の壊れた Python を
+    # 掴まないよう、uv が持ってきた自己完結の Python だけを使う
+    printf '\n=== uv: venv ===\n' >>"$ERR_LOG"
+    "$uv_bin" venv --python 3.12 --python-preference only-managed .venv >>"$ERR_LOG" 2>&1 || return 1
+    printf '\n=== uv: pip install ===\n' >>"$ERR_LOG"
+    "$uv_bin" pip install --python .venv/bin/python -r requirements.txt >>"$ERR_LOG" 2>&1 || return 1
+    return 0
+}
+
+# 除外された（壊れている）Python を報告するため、別途集める
+list_broken_pythons() {
+    local candidate seen=""
+    for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null || continue
+        python_is_healthy "$candidate" && continue
+        printf '%s (%s)\n' "$candidate" "$("$candidate" -V 2>&1)"
+    done
 }
 
 PYTHONS=$(list_pythons || true)
+USED_UV=0
 if [ -z "$PYTHONS" ]; then
+    BROKEN=$(list_broken_pythons || true)
+    if [ -n "$BROKEN" ]; then
+        warn "次の Python は壊れているため使えません（pyexpat が読み込めず pip が動きません）:"
+        printf '%s\n' "$BROKEN" | sed 's/^/        /'
+    fi
+
+    step "uv で独立した Python を用意します"
+    if setup_with_uv; then
+        USED_UV=1
+        VENV_PY=".venv/bin/python"
+        ok "uv で .venv を作成し、ライブラリも導入しました"
+    elif [ -n "$BROKEN" ]; then
+        die "使える Python が見つかりません。
+
+  Homebrew の Python でよくある不具合です（pyexpat と libexpat の不一致）。
+  次のどれかで直してください:
+
+    A) Homebrew の Python を入れ直す（この Mac 全体が直るのでおすすめ）
+         brew update && brew reinstall python@3.13
+
+    B) それでも直らなければ uv を使う（独立した Python を持ってくる）
+         curl -LsSf https://astral.sh/uv/install.sh | sh
+         bash setup_mac.sh          ← 再実行すれば uv を自動で使います
+
+    C) python.org のインストーラで入れ直す
+         https://www.python.org/downloads/macos/
+
+  直ったかどうかは次で確認できます（バージョンが出れば OK）:
+       python3.13 -c 'import platform; print(platform.mac_ver())'"
+    fi
+
     CURRENT="（python3 が見つかりません）"
     if command -v python3 >/dev/null 2>&1; then
         CURRENT="現在の python3 は $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])') です（$(command -v python3)）"
@@ -53,13 +161,12 @@ if [ -z "$PYTHONS" ]; then
   macOS に最初から入っている Python は 3.9 で、更新できません。
   次のどちらかで新しい Python を入れてください:
 
-    A) Homebrew をお使いなら（ターミナルで完結・おすすめ）
+    A) Homebrew をお使いなら
          brew install python@3.12
 
     B) Homebrew がない場合
-         https://www.python.org/downloads/macos/ を開き、
-         最新版（3.13.x）の「macOS 64-bit universal2 installer」を
-         ダウンロードして実行してください。
+         https://www.python.org/downloads/macos/ から
+         「macOS 64-bit universal2 installer」をダウンロードして実行
 
   インストール後、このスクリプトをもう一度実行してください:
        bash setup_mac.sh"
@@ -73,125 +180,41 @@ ok "$("$PY_FIRST" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3]
 # --- 2. 仮想環境 ---------------------------------------------------------
 step "仮想環境 (.venv) を用意しています"
 
-ERR_LOG="setup_error.log"
 
-# truststore を含まない最後の pip。新しい pip が動かない環境の逃げ道に使う
-PIP_WHEEL_NAME="pip-24.0-py3-none-any.whl"
-PIP_WHEEL_URL="https://files.pythonhosted.org/packages/py3/p/pip/$PIP_WHEEL_NAME"
-PIP_FIX_APPLIED=0
-MACVER_FIX_APPLIED=0
-
-# この Mac では platform.mac_ver() が空文字を返すことがある。
-# pip は wheel の対応判定 (packaging.tags.mac_platforms) と証明書処理 (truststore) の
-# 両方で macOS のバージョンを int() に渡すため、そこで ValueError になり
-# venv 作成・ensurepip・get-pip.py がまとめて失敗する。
-# → venv の中に「起動時に sw_vers から本当のバージョンを補う」パッチを仕込む。
-#    sitecustomize.py は同名のシステム側ファイルに隠されることがあるため .pth を使う。
-install_macver_fix() {
-    local site
-    site=$(.venv/bin/python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) || return 1
-    [ -n "$site" ] || return 1
-    mkdir -p "$site"
-
-    cat > "$site/_macver_fix.py" <<'PYEOF'
-"""platform.mac_ver() が空を返す macOS 向けの補正。
-
-pip は macOS のバージョンを int() に渡すため、空文字だと ValueError で落ちる。
-sw_vers（無理なら SystemVersion.plist）から実際の値を補って返す。
-この環境以外では何もしない。
-"""
-import sys
-
-if sys.platform == "darwin":
-    try:
-        import platform
-
-        if not platform.mac_ver()[0]:
-            _version = ""
-            try:
-                import subprocess
-
-                _version = subprocess.run(
-                    ["/usr/bin/sw_vers", "-productVersion"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                ).stdout.strip()
-            except Exception:
-                pass
-
-            if not _version:
-                try:
-                    import plistlib
-
-                    with open(
-                        "/System/Library/CoreServices/SystemVersion.plist", "rb"
-                    ) as _f:
-                        _version = plistlib.load(_f).get("ProductVersion", "")
-                except Exception:
-                    pass
-
-            if not _version:
-                _version = "13.0"  # 最終手段（多くの wheel が対応する保守的な値）
-
-            _machine = platform.machine() or "x86_64"
-            platform.mac_ver = lambda *a, **k: (_version, ("", "", ""), _machine)
-    except Exception:
-        pass
-PYEOF
-
-    printf 'import _macver_fix\n' > "$site/zz_macver_fix.pth"
-    return 0
-}
-
-# venv を作る。失敗したら手を替えて再試行する。
+# venv を作る。
+# 健康な Python（plistlib が読めて mac_ver が取れるもの）しか候補に入れていないので、
+# 素直に作れるのが正常。念のため ensurepip を分けて試す段を1つだけ残す。
+#
+# 以前あった truststore 回避 (PIP_USE_DEPRECATED) は削除した。
+# ensurepip は起動時に PIP_* を全て削除する（CPython の
+# ensurepip._disable_pip_configuration_settings）ため効果がないうえ、
+# pip 24.0 では legacy-certs が不正な選択肢となり別の失敗を招くため。
 try_make_venv() {
     local py="$1"
 
-    # (1) 素直に作る
+    printf '\n=== [1] %s: python -m venv ===\n' "$py" >>"$ERR_LOG"
     rm -rf .venv
-    if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
+    if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && venv_pip_works; then
         return 0
     fi
 
-    # (2) pip 抜きで作り、macOS バージョンの補正を入れてから pip を導入する
-    warn "pip が macOS のバージョンを取得できず失敗しました。補正を入れて再試行します"
+    printf '\n=== [2] %s: --without-pip + ensurepip ===\n' "$py" >>"$ERR_LOG"
     rm -rf .venv
     "$py" -m venv --without-pip .venv >>"$ERR_LOG" 2>&1 || return 1
-    install_macver_fix >>"$ERR_LOG" 2>&1 || return 1
-    MACVER_FIX_APPLIED=1
-    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
-        return 0
-    fi
-
-    # (3) 証明書処理も従来方式に落として再試行
-    warn "証明書処理も従来方式に切り替えます"
-    export PIP_USE_DEPRECATED=legacy-certs
-    PIP_FIX_APPLIED=1
-    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
-        return 0
-    fi
-
-    # (4) truststore 導入前の pip 24.0 を wheel から直接入れる（pip 不要）
-    warn "ensurepip が使えないため、pip 24.0 を直接導入します"
-    local whl=".venv/$PIP_WHEEL_NAME"
-    if curl -fsSL -o "$whl" "$PIP_WHEEL_URL" >>"$ERR_LOG" 2>&1 &&
-       .venv/bin/python "$whl/pip" install "$whl" >>"$ERR_LOG" 2>&1; then
-        rm -f "$whl"
-        return 0
-    fi
-
-    # (5) 最後の手段
-    warn "get-pip.py も試します"
-    if curl -fsSL https://bootstrap.pypa.io/get-pip.py -o .venv/get-pip.py >>"$ERR_LOG" 2>&1 &&
-       .venv/bin/python .venv/get-pip.py >>"$ERR_LOG" 2>&1; then
-        rm -f .venv/get-pip.py
-        return 0
-    fi
-    return 1
+    .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1 || return 1
+    venv_pip_works || return 1
+    return 0
 }
 
-if [ -x .venv/bin/python ] && [ -x .venv/bin/pip ]; then
+# pip の実行ファイルがあるだけでは不十分。実際に動くところまで確認する。
+venv_pip_works() {
+    [ -x .venv/bin/python ] || return 1
+    .venv/bin/python -m pip --version >>"$ERR_LOG" 2>&1
+}
+
+if [ "$USED_UV" = "1" ]; then
+    :   # uv で作成済み
+elif venv_pip_works; then
     ok "既存の .venv を再利用します"
     VENV_PY=".venv/bin/python"
 else
@@ -202,18 +225,14 @@ else
         if try_make_venv "$py"; then
             VENV_PY=".venv/bin/python"
             ok ".venv を作成しました（$("$VENV_PY" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3])')）"
-            if [ "$MACVER_FIX_APPLIED" = "1" ]; then
-                ok "macOS バージョン取得の補正を適用しました（$(.venv/bin/python -c 'import platform; print(platform.mac_ver()[0] or "不明")')）"
-            fi
-            [ "$PIP_FIX_APPLIED" = "1" ] && ok "証明書処理を従来方式に切り替えました"
             break
         fi
         warn "$py では作成できませんでした。次の Python を試します"
     done <<< "$PYTHONS"
 
     if [ -z "$VENV_PY" ]; then
-        printf "\n--- 詳細ログ（末尾30行）-------------------------------\n" >&2
-        tail -30 "$ERR_LOG" >&2
+        printf "\n--- 詳細ログ（段階ごと）-------------------------------\n" >&2
+        tail -60 "$ERR_LOG" >&2
         printf -- "-------------------------------------------------------\n" >&2
         die "仮想環境を作成できませんでした。
   上の詳細ログ（$ERR_LOG に全文あり）をそのまま共有してください。
@@ -227,7 +246,9 @@ fi
 
 # --- 3. 依存関係 ---------------------------------------------------------
 step "必要なライブラリをインストールしています（数分かかります）"
-if ! "$VENV_PY" -m pip install --quiet -r requirements.txt; then
+if [ "$USED_UV" = "1" ]; then
+    ok "uv で導入済みです"
+elif ! "$VENV_PY" -m pip install --quiet -r requirements.txt; then
     die "ライブラリのインストールに失敗しました。
 
   社内ネットワークのプロキシや SSL 検査が原因のことがあります。
