@@ -15,6 +15,51 @@ Excel の集計表として出力します。手書きの自由記述と選択�
 
 ## 1. セットアップ
 
+### Mac をお使いの場合（最短ルート）
+
+ターミナル（アプリケーション → ユーティリティ → ターミナル）を開いて、上から順に貼り付けるだけです。
+
+```bash
+cd ~/Documents
+git clone -b claude/survey-pdf-extraction-tool-vqb9pz https://github.com/MrTab00/travel-memory-sticker-card.git
+cd travel-memory-sticker-card/survey-pdf-extractor
+
+bash setup_mac.sh          # Python の確認・ライブラリ導入・動作確認まで自動
+```
+
+`setup_mac.sh` は仮想環境の作成から動作確認（API を呼ばないセルフテスト）までを行い、
+最後に次にやることを表示します。**何度実行しても壊れません。**
+途中で止まった場合は、表示されたメッセージのとおりに直してもう一度実行してください。
+
+続けて、キーの設定と実行:
+
+```bash
+export ANTHROPIC_API_KEY='sk-ant-...'    # このターミナルの間だけ有効
+
+# スキャンPDFを input/ に入れる（Finder からドラッグ＆ドロップで可）
+open .
+
+./run.sh --show-groups     # 右上の手書き番号でのグループ分けを確認（課金なし）
+./run.sh --dry-run         # 概算コストを確認（課金なし）
+./run.sh --only No01       # まず1名だけ。原本と突き合わせる
+./run.sh                   # 全員分 → output/aggregate_YYYYMMDD.xlsx
+
+open output                # 結果のフォルダを Finder で開く
+```
+
+**Mac でよくあるつまずき**
+
+| 症状 | 対処 |
+|---|---|
+| `command not found: git` | 初回は Xcode Command Line Tools の導入ダイアログが出ます。「インストール」を押して完了後に再実行 |
+| `python3 が見つかりません` | [python.org](https://www.python.org/downloads/macos/) からインストーラを入れ、ターミナルを開き直す |
+| `Python 3.9 では動きません` | 同上。macOS 標準の python3 が古い場合があります |
+| `./run.sh: Permission denied` | `chmod +x run.sh setup_mac.sh` を実行 |
+| `pip install` が SSL や proxy で失敗 | 社内ネットワークの可能性。`--proxy http://<プロキシ:ポート>` を付ける |
+| キーを毎回入れるのが面倒 | `echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.zshrc` を一度だけ実行し、ターミナルを開き直す |
+
+---
+
 **Windows（PowerShell）**
 
 ```powershell
@@ -356,6 +401,8 @@ output/
 ```
 survey-pdf-extractor/
 ├── main.py                     エントリポイント
+├── setup_mac.sh                Mac 用セットアップ（bash setup_mac.sh）
+├── run.sh                      実行用ラッパー（./run.sh --show-groups など）
 ├── questions.yaml              設問定義（★ここを書き換える）
 ├── requirements.txt
 └── survey_extractor/
