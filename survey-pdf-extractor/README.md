@@ -57,7 +57,7 @@ open output                # 結果のフォルダを Finder で開く
 | `使える Python (3.10 以上) が見つかりません` | macOS 標準の python3 は 3.9 で更新できません。`brew install python@3.12`、または [python.org](https://www.python.org/downloads/macos/) の「macOS 64-bit universal2 installer」を入れて `bash setup_mac.sh` を再実行（PATH が古いままでもスクリプトが新しい方を探します） |
 | `./run.sh: Permission denied` | `chmod +x run.sh setup_mac.sh` を実行 |
 | `pip install` が SSL や proxy で失敗 | 社内ネットワークの可能性。`--proxy http://<プロキシ:ポート>` を付ける |
-| `ensurepip ... returned non-zero exit status 1` / `truststore` の `ValueError` | pip 24.2 以降が既定で使う truststore が `platform.mac_ver()` を読めない環境で起きます。`setup_mac.sh` が pip 公式の `--use-deprecated=legacy-certs` に自動で切り替えて回避します（手動なら `export PIP_USE_DEPRECATED=legacy-certs` を先に実行） |
+| `invalid literal for int() with base 10: ''`（`truststore` / `packaging/tags.py`） | `platform.mac_ver()` が空を返す Mac で起きます。pip は macOS のバージョンを wheel 判定と証明書処理の両方で使うため、両方が落ちます。`setup_mac.sh` が venv 内に補正（`sw_vers` から実バージョンを補う `.pth`）を入れて回避します |
 | `.env` が見つからない | `cp .env.example .env && chmod 600 .env` を実行 |
 
 ---

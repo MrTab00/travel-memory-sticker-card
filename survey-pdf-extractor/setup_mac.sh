@@ -79,14 +79,72 @@ ERR_LOG="setup_error.log"
 PIP_WHEEL_NAME="pip-24.0-py3-none-any.whl"
 PIP_WHEEL_URL="https://files.pythonhosted.org/packages/py3/p/pip/$PIP_WHEEL_NAME"
 PIP_FIX_APPLIED=0
+MACVER_FIX_APPLIED=0
+
+# この Mac では platform.mac_ver() が空文字を返すことがある。
+# pip は wheel の対応判定 (packaging.tags.mac_platforms) と証明書処理 (truststore) の
+# 両方で macOS のバージョンを int() に渡すため、そこで ValueError になり
+# venv 作成・ensurepip・get-pip.py がまとめて失敗する。
+# → venv の中に「起動時に sw_vers から本当のバージョンを補う」パッチを仕込む。
+#    sitecustomize.py は同名のシステム側ファイルに隠されることがあるため .pth を使う。
+install_macver_fix() {
+    local site
+    site=$(.venv/bin/python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) || return 1
+    [ -n "$site" ] || return 1
+    mkdir -p "$site"
+
+    cat > "$site/_macver_fix.py" <<'PYEOF'
+"""platform.mac_ver() が空を返す macOS 向けの補正。
+
+pip は macOS のバージョンを int() に渡すため、空文字だと ValueError で落ちる。
+sw_vers（無理なら SystemVersion.plist）から実際の値を補って返す。
+この環境以外では何もしない。
+"""
+import sys
+
+if sys.platform == "darwin":
+    try:
+        import platform
+
+        if not platform.mac_ver()[0]:
+            _version = ""
+            try:
+                import subprocess
+
+                _version = subprocess.run(
+                    ["/usr/bin/sw_vers", "-productVersion"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+            except Exception:
+                pass
+
+            if not _version:
+                try:
+                    import plistlib
+
+                    with open(
+                        "/System/Library/CoreServices/SystemVersion.plist", "rb"
+                    ) as _f:
+                        _version = plistlib.load(_f).get("ProductVersion", "")
+                except Exception:
+                    pass
+
+            if not _version:
+                _version = "13.0"  # 最終手段（多くの wheel が対応する保守的な値）
+
+            _machine = platform.machine() or "x86_64"
+            platform.mac_ver = lambda *a, **k: (_version, ("", "", ""), _machine)
+    except Exception:
+        pass
+PYEOF
+
+    printf 'import _macver_fix\n' > "$site/zz_macver_fix.pth"
+    return 0
+}
 
 # venv を作る。失敗したら手を替えて再試行する。
-#
-# 背景: pip 24.2 以降は macOS のキーチェーン連携 (truststore) を既定で使うが、
-# platform.mac_ver() が空文字を返す Mac ではその読み込みが ValueError で落ちる。
-# ensurepip も get-pip.py も内部で pip を動かすため、全部まとめて失敗する。
-# pip 公式の逃げ道 --use-deprecated=legacy-certs（環境変数 PIP_USE_DEPRECATED）で
-# truststore を使わせないようにすれば回避できる。
 try_make_venv() {
     local py="$1"
 
@@ -96,24 +154,26 @@ try_make_venv() {
         return 0
     fi
 
-    # (2) truststore を使わせずに作り直す（この Mac ではこれで通るはず）
-    warn "pip の証明書処理 (truststore) で失敗しました。従来方式に切り替えて再試行します"
-    export PIP_USE_DEPRECATED=legacy-certs
-    PIP_FIX_APPLIED=1
+    # (2) pip 抜きで作り、macOS バージョンの補正を入れてから pip を導入する
+    warn "pip が macOS のバージョンを取得できず失敗しました。補正を入れて再試行します"
     rm -rf .venv
-    if "$py" -m venv .venv >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
+    "$py" -m venv --without-pip .venv >>"$ERR_LOG" 2>&1 || return 1
+    install_macver_fix >>"$ERR_LOG" 2>&1 || return 1
+    MACVER_FIX_APPLIED=1
+    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
         return 0
     fi
 
-    # (3) pip 抜きで作ってから ensurepip
-    rm -rf .venv
-    "$py" -m venv --without-pip .venv >>"$ERR_LOG" 2>&1 || return 1
-    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1; then
+    # (3) 証明書処理も従来方式に落として再試行
+    warn "証明書処理も従来方式に切り替えます"
+    export PIP_USE_DEPRECATED=legacy-certs
+    PIP_FIX_APPLIED=1
+    if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1 && [ -x .venv/bin/pip ]; then
         return 0
     fi
 
     # (4) truststore 導入前の pip 24.0 を wheel から直接入れる（pip 不要）
-    warn "ensurepip も使えないため、pip 24.0 を直接導入します"
+    warn "ensurepip が使えないため、pip 24.0 を直接導入します"
     local whl=".venv/$PIP_WHEEL_NAME"
     if curl -fsSL -o "$whl" "$PIP_WHEEL_URL" >>"$ERR_LOG" 2>&1 &&
        .venv/bin/python "$whl/pip" install "$whl" >>"$ERR_LOG" 2>&1; then
@@ -142,7 +202,10 @@ else
         if try_make_venv "$py"; then
             VENV_PY=".venv/bin/python"
             ok ".venv を作成しました（$("$VENV_PY" -c 'import sys; print("Python %d.%d.%d" % sys.version_info[:3])')）"
-            [ "$PIP_FIX_APPLIED" = "1" ] && ok "この環境向けに PIP_USE_DEPRECATED=legacy-certs を適用しました"
+            if [ "$MACVER_FIX_APPLIED" = "1" ]; then
+                ok "macOS バージョン取得の補正を適用しました（$(.venv/bin/python -c 'import platform; print(platform.mac_ver()[0] or "不明")')）"
+            fi
+            [ "$PIP_FIX_APPLIED" = "1" ] && ok "証明書処理を従来方式に切り替えました"
             break
         fi
         warn "$py では作成できませんでした。次の Python を試します"
