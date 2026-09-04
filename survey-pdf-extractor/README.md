@@ -54,8 +54,7 @@ open output                # 結果のフォルダを Finder で開く
 | 症状 | 対処 |
 |---|---|
 | `command not found: git` | 初回は Xcode Command Line Tools の導入ダイアログが出ます。「インストール」を押して完了後に再実行 |
-| `python3 が見つかりません` | [python.org](https://www.python.org/downloads/macos/) からインストーラを入れ、ターミナルを開き直す |
-| `Python 3.9 では動きません` | 同上。macOS 標準の python3 が古い場合があります |
+| `使える Python (3.10 以上) が見つかりません` | macOS 標準の python3 は 3.9 で更新できません。`brew install python@3.12`、または [python.org](https://www.python.org/downloads/macos/) の「macOS 64-bit universal2 installer」を入れて `bash setup_mac.sh` を再実行（PATH が古いままでもスクリプトが新しい方を探します） |
 | `./run.sh: Permission denied` | `chmod +x run.sh setup_mac.sh` を実行 |
 | `pip install` が SSL や proxy で失敗 | 社内ネットワークの可能性。`--proxy http://<プロキシ:ポート>` を付ける |
 | `.env` が見つからない | `cp .env.example .env && chmod 600 .env` を実行 |

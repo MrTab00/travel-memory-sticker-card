@@ -20,33 +20,64 @@ die()  { printf "\n%sエラー:%s %s\n" "$RED" "$NC" "$1" >&2; exit 1; }
 # --- 1. Python -----------------------------------------------------------
 step "Python を確認しています"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    die "python3 が見つかりません。
+# PATH の通っていない場所に入っていることがあるので、候補を順に探す
+# （macOS 標準の /usr/bin/python3 は 3.9 で古く、更新できない）
+find_python() {
+    local candidate
+    for version in 3.13 3.12 3.11 3.10; do
+        for candidate in \
+            "python$version" \
+            "/Library/Frameworks/Python.framework/Versions/$version/bin/python3" \
+            "/opt/homebrew/bin/python$version" \
+            "/usr/local/bin/python$version"
+        do
+            if command -v "$candidate" >/dev/null 2>&1 &&
+               "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null; then
+                printf '%s' "$candidate"
+                return 0
+            fi
+        done
+    done
+    if command -v python3 >/dev/null 2>&1 &&
+       python3 -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null; then
+        printf 'python3'
+        return 0
+    fi
+    return 1
+}
 
-  次のいずれかで Python 3.11 以上を入れてください:
-    A) https://www.python.org/downloads/macos/ からインストーラをダウンロード（おすすめ）
-    B) Homebrew が入っていれば:  brew install python@3.12
+if ! PYBIN=$(find_python); then
+    CURRENT="（python3 が見つかりません）"
+    if command -v python3 >/dev/null 2>&1; then
+        CURRENT="現在の python3 は $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])') です（$(command -v python3)）"
+    fi
+    die "使える Python (3.10 以上) が見つかりません。
+  $CURRENT
 
-  インストール後、ターミナルを開き直してもう一度 bash setup_mac.sh を実行してください。"
+  macOS に最初から入っている Python は 3.9 で、更新できません。
+  次のどちらかで新しい Python を入れてください:
+
+    A) Homebrew をお使いなら（ターミナルで完結・おすすめ）
+         brew install python@3.12
+
+    B) Homebrew がない場合
+         https://www.python.org/downloads/macos/ を開き、
+         最新版（3.13.x）の「macOS 64-bit universal2 installer」を
+         ダウンロードして実行してください。
+
+  インストール後、このスクリプトをもう一度実行してください:
+       bash setup_mac.sh"
 fi
 
-PY_VERSION=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info[:2] >= (3, 10) else 0)')
-if [ "$PY_OK" != "1" ]; then
-    die "Python $PY_VERSION では動きません（3.10 以上が必要、3.11 以上を推奨）。
-
-  macOS に最初から入っている python3 は古いことがあります。
-  https://www.python.org/downloads/macos/ から新しい Python を入れ、
-  ターミナルを開き直してもう一度実行してください。"
-fi
-ok "Python $PY_VERSION ($(command -v python3))"
+PY_VERSION=$("$PYBIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
+ok "Python $PY_VERSION ($(command -v "$PYBIN"))"
 
 # --- 2. 仮想環境 ---------------------------------------------------------
 step "仮想環境 (.venv) を用意しています"
 if [ -x .venv/bin/python ]; then
     ok "既存の .venv を再利用します"
 else
-    python3 -m venv .venv || die "仮想環境を作成できませんでした。ディスクの空き容量と書き込み権限をご確認ください。"
+    "$PYBIN" -m venv .venv || die "仮想環境を作成できませんでした。ディスクの空き容量と書き込み権限をご確認ください。"
     ok ".venv を作成しました"
 fi
 VENV_PY=".venv/bin/python"
