@@ -8,6 +8,8 @@
 # =============================================================================
 set -u
 
+# 注: macOS 標準の bash は 3.2 のため、"$VAR" の直後に全角文字を置かないこと
+#     （変数名の一部と解釈されて unbound variable になる）
 line() { printf '\n----- %s -----\n' "$1"; }
 
 echo "==================== 環境診断 ===================="
@@ -45,7 +47,7 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || { echo "使える Python が見つかりません"; exit 1; }
 
-line "3. mac_ver が空になる原因の切り分け（対象: $PY）"
+line "3. mac_ver が空になる原因の切り分け（対象: ${PY}）"
 "$PY" - <<'PYEOF' 2>&1 | sed 's/^/  /'
 import os, sys
 
@@ -86,7 +88,8 @@ for v in PYTHONPATH PYTHONHOME PYTHONSTARTUP SYSTEM_VERSION_COMPAT \
          MACOSX_DEPLOYMENT_TARGET PIP_USE_DEPRECATED PIP_CONFIG_FILE \
          SSL_CERT_FILE REQUESTS_CA_BUNDLE VIRTUAL_ENV
 do
-    eval "val=\${$v:-（未設定）}"
+    val=$(printenv "$v" 2>/dev/null || true)
+    [ -n "$val" ] || val="(未設定)"
     printf '  %-28s %s\n' "$v" "$val"
 done
 echo "  pip 設定ファイル:"
