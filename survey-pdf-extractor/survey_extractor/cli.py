@@ -54,6 +54,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--layout", choices=["auto", "per_respondent", "single_file", "by_page_marker"], help="入力 PDF の構成（questions.yaml を上書き）")
     parser.add_argument("--show-groups", action="store_true", help="回答者のグループ分けだけ表示して終了する（by_page_marker の確認用）")
     parser.add_argument("--redetect-markers", action="store_true", help="右上の手書き番号を読み取り直す（キャッシュを無視）")
+    parser.add_argument(
+        "--set-marker",
+        nargs="+",
+        metavar="ページ=番号",
+        help="読み取った番号を手で修正する（例: --set-marker 101=17 102=17）。"
+        "修正はキャッシュに保存され、以降そのまま使われます。",
+    )
     parser.add_argument("--pages", type=int, help="1名あたりのページ数（questions.yaml を上書き）")
     parser.add_argument("--model", help="使用するモデル（questions.yaml を上書き）")
     parser.add_argument("--only", nargs="+", metavar="ID", help="指定した回答者IDだけ処理する")
@@ -153,6 +160,12 @@ def _discover_by_marker(
         else:
             warnings.append(f"{path.name}: 既存の番号読み取り結果を使用（{cache.name}）")
 
+        if args.set_marker:
+            applied = _apply_marker_overrides(data, args.set_marker, total)
+            if applied:
+                markers.save_cache(cache, data)
+                warnings.extend(f"{path.name}: {a}" for a in applied)
+
         groups, group_warnings = markers.group_by_marker(data, config.meta.pages_per_respondent)
         warnings.extend(f"{path.name}: {w}" for w in group_warnings)
 
@@ -168,6 +181,32 @@ def _discover_by_marker(
         seen.add(r.id)
 
     return respondents, warnings
+
+
+def _apply_marker_overrides(
+    data: dict[int, dict[str, Any]], overrides: list[str], total_pages: int
+) -> list[str]:
+    """--set-marker 101=17 の形式を反映する。戻り値は適用内容の説明。"""
+    applied: list[str] = []
+    for item in overrides:
+        if "=" not in item:
+            raise MarkerError(f"--set-marker の書式が違います（ページ=番号）: {item}")
+        raw_page, _, raw_marker = item.partition("=")
+        try:
+            page = int(raw_page.strip())
+        except ValueError:
+            raise MarkerError(f"--set-marker のページ番号が数字ではありません: {item}") from None
+        if not 1 <= page <= total_pages:
+            raise MarkerError(f"--set-marker のページ番号が範囲外です（1〜{total_pages}）: {page}")
+
+        marker = markers.normalize_marker(raw_marker)
+        if marker is None:
+            raise MarkerError(f"--set-marker の番号が空です: {item}")
+
+        before = (data.get(page) or {}).get("marker")
+        data[page] = {"marker": marker, "confidence": "manual"}
+        applied.append(f"{page}ページの番号を手動修正: {before} → {marker}")
+    return applied
 
 
 def _show_groups(respondents: list[Respondent]) -> None:
