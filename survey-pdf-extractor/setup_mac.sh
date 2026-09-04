@@ -75,6 +75,10 @@ step "仮想環境 (.venv) を用意しています"
 
 ERR_LOG="setup_error.log"
 
+# truststore を含まない最後の pip。新しい pip が動かない環境の逃げ道に使う
+PIP_WHEEL_NAME="pip-24.0-py3-none-any.whl"
+PIP_WHEEL_URL="https://files.pythonhosted.org/packages/py3/p/pip/$PIP_WHEEL_NAME"
+
 # venv 作成 → 失敗したら pip 抜きで作り直して pip を入れ直す
 # （python.org 版などで ensurepip が壊れていることがあるため）
 try_make_venv() {
@@ -91,7 +95,19 @@ try_make_venv() {
     if .venv/bin/python -m ensurepip --upgrade --default-pip >>"$ERR_LOG" 2>&1; then
         return 0
     fi
-    warn "ensurepip も使えないため、pip を直接ダウンロードします"
+    # 新しい pip は macOS の証明書ストア連携 (truststore) を使うが、
+    # platform.mac_ver() が空を返す環境ではその読み込みで落ちる。
+    # ensurepip も get-pip.py も内部で新しい pip を動かすため同じ理由で失敗する。
+    # → truststore 導入前の pip 24.0 を wheel から直接入れる（pip 不要）
+    warn "ensurepip も使えないため、pip 24.0 を直接導入します"
+    local whl=".venv/$PIP_WHEEL_NAME"
+    if curl -fsSL -o "$whl" "$PIP_WHEEL_URL" >>"$ERR_LOG" 2>&1 &&
+       .venv/bin/python "$whl/pip" install "$whl" >>"$ERR_LOG" 2>&1; then
+        rm -f "$whl"
+        return 0
+    fi
+
+    warn "get-pip.py も試します"
     if curl -fsSL https://bootstrap.pypa.io/get-pip.py -o .venv/get-pip.py >>"$ERR_LOG" 2>&1 &&
        .venv/bin/python .venv/get-pip.py >>"$ERR_LOG" 2>&1; then
         rm -f .venv/get-pip.py
@@ -132,7 +148,6 @@ fi
 
 # --- 3. 依存関係 ---------------------------------------------------------
 step "必要なライブラリをインストールしています（数分かかります）"
-"$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || warn "pip の更新に失敗しましたが続行します"
 if ! "$VENV_PY" -m pip install --quiet -r requirements.txt; then
     die "ライブラリのインストールに失敗しました。
 
